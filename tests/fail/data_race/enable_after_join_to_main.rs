@@ -1,5 +1,3 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
-
 use std::thread::spawn;
 
 #[derive(Copy, Clone)]

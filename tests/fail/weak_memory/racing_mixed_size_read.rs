@@ -1,5 +1,3 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
-
 #![feature(core_intrinsics)]
 
 use std::sync::atomic::AtomicU32;

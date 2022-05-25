@@ -11,6 +11,8 @@ use rustc_data_structures::fx::FxHashMap;
 use rustc_hir::def_id::DefId;
 use rustc_index::vec::{Idx, IndexVec};
 use rustc_middle::mir::Mutability;
+use rustc_middle::ty::layout::TyAndLayout;
+use rustc_target::spec::abi::Abi;
 
 use crate::concurrency::data_race;
 use crate::sync::SynchronizationState;
@@ -179,7 +181,7 @@ impl<'mir, 'tcx> Thread<'mir, 'tcx> {
 }
 
 /// A specific moment in time.
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum Time {
     Monotonic(Instant),
     RealTime(SystemTime),
@@ -369,14 +371,45 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
         // Mark the joined thread as being joined so that we detect if other
         // threads try to join it.
         self.threads[joined_thread_id].join_status = ThreadJoinStatus::Joined;
+
+        self.wait_on_thread(joined_thread_id, None, data_race)
+    }
+
+    fn wait_on_thread(
+        &mut self,
+        joined_thread_id: ThreadId,
+        timeout: Option<Time>,
+        data_race: Option<&mut data_race::GlobalState>,
+    ) -> InterpResult<'tcx> {
         if self.threads[joined_thread_id].state != ThreadState::Terminated {
             // The joined thread is still running, we need to wait for it.
             self.active_thread_mut().state = ThreadState::BlockedOnJoin(joined_thread_id);
-            trace!(
-                "{:?} blocked on {:?} when trying to join",
-                self.active_thread,
-                joined_thread_id
-            );
+
+            if let Some(timeout) = timeout {
+                self.register_timeout_callback(
+                    joined_thread_id,
+                    timeout,
+                    Box::new(move |ecx| {
+                        let state = &mut ecx.machine.threads.threads[joined_thread_id].state;
+                        assert_eq!(*state, ThreadState::BlockedOnJoin(joined_thread_id));
+                        *state = ThreadState::Enabled;
+                        Ok(())
+                    }),
+                );
+
+                trace!(
+                    "{:?} blocked on {:?} for {:?} when trying to join",
+                    self.active_thread,
+                    joined_thread_id,
+                    timeout
+                );
+            } else {
+                trace!(
+                    "{:?} blocked on {:?} when trying to join",
+                    self.active_thread,
+                    joined_thread_id
+                );
+            }
         } else {
             // The thread has already terminated - mark join happens-before
             if let Some(data_race) = data_race {
@@ -388,7 +421,12 @@ impl<'mir, 'tcx: 'mir> ThreadManager<'mir, 'tcx> {
 
     /// Set the name of the active thread.
     fn set_active_thread_name(&mut self, new_thread_name: Vec<u8>) {
-        self.active_thread_mut().thread_name = Some(new_thread_name);
+        self.set_thread_name(self.active_thread, new_thread_name);
+    }
+
+    /// Set the name of a thread.
+    fn set_thread_name(&mut self, thread: ThreadId, new_thread_name: Vec<u8>) {
+        self.threads[thread].thread_name = Some(new_thread_name);
     }
 
     /// Get the name of the active thread.
@@ -621,6 +659,63 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     }
 
     #[inline]
+    fn start_thread(
+        &mut self,
+        thread: Option<&OpTy<'tcx, Tag>>,
+        start_routine: &OpTy<'tcx, Tag>,
+        start_abi: Abi,
+        arg: &OpTy<'tcx, Tag>,
+        ret_layout: TyAndLayout<'tcx>,
+    ) -> InterpResult<'tcx, ThreadId> {
+        let this = self.eval_context_mut();
+
+        // Create the new thread
+        let new_thread_id = this.create_thread();
+
+        // Write the current thread-id, switch to the next thread later
+        // to treat this write operation as occuring on the current thread.
+        if let Some(thread) = thread {
+            let thread_info_place = this.deref_operand(thread)?;
+
+            this.write_scalar(
+                Scalar::from_uint(new_thread_id.to_u32(), thread_info_place.layout.size),
+                &thread_info_place.into(),
+            )?;
+        }
+
+        // Read the function argument that will be sent to the new thread
+        // before the thread starts executing since reading after the
+        // context switch will incorrectly report a data-race.
+        let fn_ptr = this.read_pointer(start_routine)?;
+        let func_arg = this.read_immediate(arg)?;
+
+        // Finally switch to new thread so that we can push the first stackframe.
+        // After this all accesses will be treated as occuring in the new thread.
+        let old_thread_id = this.set_active_thread(new_thread_id);
+
+        // Perform the function pointer load in the new thread frame.
+        let instance = this.get_ptr_fn(fn_ptr)?.as_instance()?;
+
+        // Note: the returned value is currently ignored (see the FIXME in
+        // pthread_join below) because the Rust standard library does not use
+        // it.
+        let ret_place = this.allocate(ret_layout, MiriMemoryKind::Machine.into())?;
+
+        this.call_function(
+            instance,
+            start_abi,
+            &[*func_arg],
+            Some(&ret_place.into()),
+            StackPopCleanup::Root { cleanup: true },
+        )?;
+
+        // Restore the old active thread frame.
+        this.set_active_thread(old_thread_id);
+
+        Ok(new_thread_id)
+    }
+
+    #[inline]
     fn detach_thread(&mut self, thread_id: ThreadId) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         this.machine.threads.detach_thread(thread_id)
@@ -630,6 +725,21 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     fn join_thread(&mut self, joined_thread_id: ThreadId) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         this.machine.threads.join_thread(joined_thread_id, this.machine.data_race.as_mut())?;
+        Ok(())
+    }
+
+    #[inline]
+    fn wait_on_thread(
+        &mut self,
+        timeout: Option<Time>,
+        joined_thread_id: ThreadId,
+    ) -> InterpResult<'tcx> {
+        let this = self.eval_context_mut();
+        this.machine.threads.wait_on_thread(
+            joined_thread_id,
+            timeout,
+            this.machine.data_race.as_mut(),
+        )?;
         Ok(())
     }
 
@@ -694,9 +804,25 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     }
 
     #[inline]
+    fn set_thread_name(&mut self, thread: ThreadId, new_thread_name: Vec<u8>) {
+        let this = self.eval_context_mut();
+        this.machine.threads.set_thread_name(thread, new_thread_name);
+    }
+
+    #[inline]
+    fn set_thread_name_wide(&mut self, thread: ThreadId, new_thread_name: Vec<u16>) {
+        let this = self.eval_context_mut();
+        this.machine.threads.set_thread_name(
+            thread,
+            new_thread_name.into_iter().flat_map(u16::to_ne_bytes).collect(),
+        );
+    }
+
+    #[inline]
     fn set_active_thread_name(&mut self, new_thread_name: Vec<u8>) {
         let this = self.eval_context_mut();
-        this.machine.threads.set_active_thread_name(new_thread_name);
+
+        this.set_active_thread_name(new_thread_name);
     }
 
     #[inline]

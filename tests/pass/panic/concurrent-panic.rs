@@ -1,4 +1,4 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
+// ignore-windows: Condvars on Windows are not supported yet.
 // We are making scheduler assumptions here.
 // compile-flags: -Zmiri-preemption-rate=0
 

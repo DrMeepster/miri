@@ -1,4 +1,4 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
+// ignore-windows: Yielding and channels on Windows are not supported yet.
 // This specifically tests behavior *without* preemption.
 // compile-flags: -Zmiri-preemption-rate=0
 

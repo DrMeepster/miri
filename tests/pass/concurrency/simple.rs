@@ -1,4 +1,3 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
 // compile-flags: -Zmiri-strict-provenance
 
 use std::thread;

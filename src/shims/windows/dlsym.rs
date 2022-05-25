@@ -5,11 +5,13 @@ use rustc_target::spec::abi::Abi;
 use log::trace;
 
 use crate::helpers::check_arg_count;
+use crate::shims::windows::handle::Handle;
 use crate::*;
 
 #[derive(Debug, Copy, Clone)]
 pub enum Dlsym {
     NtWriteFile,
+    SetThreadDescription,
 }
 
 impl Dlsym {
@@ -20,6 +22,7 @@ impl Dlsym {
             "GetSystemTimePreciseAsFileTime" => None,
             "SetThreadDescription" => None,
             "NtWriteFile" => Some(Dlsym::NtWriteFile),
+            "SetThreadDescription" => Some(Dlsym::SetThreadDescription),
             _ => throw_unsup_format!("unsupported Windows dlsym: {}", name),
         })
     }
@@ -105,6 +108,22 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
                     Scalar::from_i32(if written.is_some() { 0 } else { 0xC0000185u32 as i32 }),
                     dest,
                 )?;
+            }
+            Dlsym::SetThreadDescription => {
+                let [handle, name] = check_arg_count(args)?;
+
+                let name = this.read_wide_str(this.read_pointer(name)?)?;
+
+                let thread =
+                    match Handle::from_scalar(this.read_scalar(handle)?.check_init()?, this)? {
+                        Some(Handle::Thread(thread)) => thread,
+                        Some(Handle::CurrentThread) => this.get_active_thread(),
+                        _ => throw_ub_format!("invalid handle"),
+                    };
+
+                this.set_thread_name_wide(thread, name);
+
+                this.write_null(dest)?;
             }
         }
 

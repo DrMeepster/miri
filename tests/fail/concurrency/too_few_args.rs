@@ -1,5 +1,3 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
-
 //! The thread function must have exactly one argument.
 
 #![feature(rustc_private)]

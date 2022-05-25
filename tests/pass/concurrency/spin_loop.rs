@@ -1,4 +1,4 @@
-// ignore-windows: Concurrency on Windows is not supported yet.
+// ignore-windows: Yielding on Windows is not supported yet.
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 

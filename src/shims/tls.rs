@@ -235,7 +235,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     fn schedule_windows_tls_dtors(&mut self) -> InterpResult<'tcx> {
         let this = self.eval_context_mut();
         let active_thread = this.get_active_thread();
-        assert_eq!(this.get_total_thread_count(), 1, "concurrency on Windows is not supported");
+
         // Windows has a special magic linker section that is run on certain events.
         // Instead of searching for that section and supporting arbitrary hooks in there
         // (that would be basically https://github.com/rust-lang/miri/issues/450),
@@ -252,7 +252,7 @@ trait EvalContextPrivExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
             this.get_ptr_fn(this.scalar_to_ptr(thread_callback)?)?.as_instance()?;
 
         // The signature of this function is `unsafe extern "system" fn(h: c::LPVOID, dwReason: c::DWORD, pv: c::LPVOID)`.
-        let reason = this.eval_path_scalar(&["std", "sys", "windows", "c", "DLL_THREAD_DETACH"])?;
+        let reason = this.eval_windows("c", "DLL_THREAD_DETACH")?;
         this.call_function(
             thread_callback,
             Abi::System { unwind: false },
