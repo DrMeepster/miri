@@ -42,6 +42,10 @@ macro_rules! declare_id {
         }
 
         impl $name {
+            pub fn to_u32(&self) -> u32 {
+                self.0.get()
+            }
+
             pub fn to_u32_scalar<'tcx>(&self) -> Scalar<Tag> {
                 Scalar::from_u32(self.0.get())
             }
@@ -110,8 +114,10 @@ declare_id!(CondvarId);
 struct CondvarWaiter {
     /// The thread that is waiting on this variable.
     thread: ThreadId,
-    /// The mutex on which the thread is waiting.
-    mutex: MutexId,
+    /// The mutex or rwlock on which the thread is waiting.
+    lock: u32,
+    /// If the lock is shared or exclusive
+    shared: bool,
 }
 
 /// The conditional variable state.
@@ -140,11 +146,13 @@ struct Futex {
 
 /// A thread waiting on a futex.
 #[derive(Debug)]
-struct FutexWaiter {
+pub struct FutexWaiter {
     /// The thread that is waiting on this futex.
-    thread: ThreadId,
+    pub thread: ThreadId,
     /// The bitset used by FUTEX_*_BITSET, or u32::MAX for other operations.
-    bitset: u32,
+    pub bitset: u32,
+    /// The value used by WaitOnAddress & WakeByAddressSingle to determine if a thread should wake
+    pub undesired: Option<(u64, u64)>,
 }
 
 /// The state of all synchronization variables.
@@ -513,16 +521,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     }
 
     /// Mark that the thread is waiting on the conditional variable.
-    fn condvar_wait(&mut self, id: CondvarId, thread: ThreadId, mutex: MutexId) {
+    fn condvar_wait(&mut self, id: CondvarId, thread: ThreadId, lock: u32, shared: bool) {
         let this = self.eval_context_mut();
         let waiters = &mut this.machine.threads.sync.condvars[id].waiters;
         assert!(waiters.iter().all(|waiter| waiter.thread != thread), "thread is already waiting");
-        waiters.push_back(CondvarWaiter { thread, mutex });
+        waiters.push_back(CondvarWaiter { thread, lock, shared });
     }
 
     /// Wake up some thread (if there is any) sleeping on the conditional
     /// variable.
-    fn condvar_signal(&mut self, id: CondvarId) -> Option<(ThreadId, MutexId)> {
+    fn condvar_signal(&mut self, id: CondvarId) -> Option<(ThreadId, u32, bool)> {
         let this = self.eval_context_mut();
         let current_thread = this.get_active_thread();
         let condvar = &mut this.machine.threads.sync.condvars[id];
@@ -536,7 +544,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
             if let Some(data_race) = data_race {
                 data_race.validate_lock_acquire(&condvar.data_race, waiter.thread);
             }
-            (waiter.thread, waiter.mutex)
+            (waiter.thread, waiter.lock, waiter.shared)
         })
     }
 
@@ -547,15 +555,21 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         this.machine.threads.sync.condvars[id].waiters.retain(|waiter| waiter.thread != thread);
     }
 
-    fn futex_wait(&mut self, addr: u64, thread: ThreadId, bitset: u32) {
+    fn futex_wait(
+        &mut self,
+        addr: u64,
+        thread: ThreadId,
+        bitset: u32,
+        undesired: Option<(u64, u64)>,
+    ) {
         let this = self.eval_context_mut();
         let futex = &mut this.machine.threads.sync.futexes.entry(addr).or_default();
         let waiters = &mut futex.waiters;
         assert!(waiters.iter().all(|waiter| waiter.thread != thread), "thread is already waiting");
-        waiters.push_back(FutexWaiter { thread, bitset });
+        waiters.push_back(FutexWaiter { thread, bitset, undesired });
     }
 
-    fn futex_wake(&mut self, addr: u64, bitset: u32) -> Option<ThreadId> {
+    fn futex_wake(&mut self, addr: u64, bitset: u32) -> Option<FutexWaiter> {
         let this = self.eval_context_mut();
         let current_thread = this.get_active_thread();
         let futex = &mut this.machine.threads.sync.futexes.get_mut(&addr)?;
@@ -572,7 +586,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
             if let Some(data_race) = data_race {
                 data_race.validate_lock_acquire(&futex.data_race, waiter.thread);
             }
-            waiter.thread
+            waiter
         })
     }
 

@@ -753,8 +753,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
     fn pthread_cond_signal(&mut self, cond_op: &OpTy<'tcx, Tag>) -> InterpResult<'tcx, i32> {
         let this = self.eval_context_mut();
         let id = cond_get_or_create_id(this, cond_op)?;
-        if let Some((thread, mutex)) = this.condvar_signal(id) {
-            post_cond_signal(this, thread, mutex)?;
+        if let Some((thread, mutex, _)) = this.condvar_signal(id) {
+            post_cond_signal(this, thread, MutexId::from_u32(mutex))?;
         }
 
         Ok(0)
@@ -764,8 +764,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         let this = self.eval_context_mut();
         let id = cond_get_or_create_id(this, cond_op)?;
 
-        while let Some((thread, mutex)) = this.condvar_signal(id) {
-            post_cond_signal(this, thread, mutex)?;
+        while let Some((thread, mutex, _)) = this.condvar_signal(id) {
+            post_cond_signal(this, thread, MutexId::from_u32(mutex))?;
         }
 
         Ok(0)
@@ -783,7 +783,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         let active_thread = this.get_active_thread();
 
         release_cond_mutex_and_block(this, active_thread, mutex_id)?;
-        this.condvar_wait(id, active_thread, mutex_id);
+        this.condvar_wait(id, active_thread, mutex_id.to_u32(), false);
 
         Ok(0)
     }
@@ -823,7 +823,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
         };
 
         release_cond_mutex_and_block(this, active_thread, mutex_id)?;
-        this.condvar_wait(id, active_thread, mutex_id);
+        this.condvar_wait(id, active_thread, mutex_id.to_u32(), false);
 
         // We return success for now and override it in the timeout callback.
         this.write_scalar(Scalar::from_i32(0), dest)?;

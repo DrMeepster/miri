@@ -6,12 +6,15 @@ use log::trace;
 
 use crate::helpers::check_arg_count;
 use crate::shims::windows::handle::Handle;
+use crate::shims::windows::sync::EvalContextExt as _;
 use crate::*;
 
 #[derive(Debug, Copy, Clone)]
 pub enum Dlsym {
     NtWriteFile,
     SetThreadDescription,
+    WaitOnAddress,
+    WakeByAddressSingle,
 }
 
 impl Dlsym {
@@ -20,9 +23,10 @@ impl Dlsym {
     pub fn from_str<'tcx>(name: &str) -> InterpResult<'tcx, Option<Dlsym>> {
         Ok(match name {
             "GetSystemTimePreciseAsFileTime" => None,
-            "SetThreadDescription" => None,
             "NtWriteFile" => Some(Dlsym::NtWriteFile),
             "SetThreadDescription" => Some(Dlsym::SetThreadDescription),
+            "WaitOnAddress" => Some(Dlsym::WaitOnAddress),
+            "WakeByAddressSingle" => Some(Dlsym::WakeByAddressSingle),
             _ => throw_unsup_format!("unsupported Windows dlsym: {}", name),
         })
     }
@@ -124,6 +128,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
                 this.set_thread_name_wide(thread, name);
 
                 this.write_null(dest)?;
+            }
+            Dlsym::WaitOnAddress => {
+                let [ptr_op, compare_op, size_op, timeout_op] = check_arg_count(args)?;
+
+                this.WaitOnAddress(ptr_op, compare_op, size_op, timeout_op, dest)?;
+            }
+            Dlsym::WakeByAddressSingle => {
+                let [ptr_op] = check_arg_count(args)?;
+
+                this.WakeByAddressSingle(ptr_op)?;
             }
         }
 

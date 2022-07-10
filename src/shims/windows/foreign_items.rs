@@ -286,6 +286,24 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriEvalContextExt<'mir, 'tcx
                 let ret = this.TryAcquireSRWLockShared(ptr)?;
                 this.write_scalar(Scalar::from_u8(ret), dest)?;
             }
+            "SleepConditionVariableSRW" => {
+                let [condvar, lock, timeout, flags] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+
+                this.SleepConditionVariableSRW(condvar, lock, timeout, flags, dest)?;
+            }
+            "WakeConditionVariable" => {
+                let [condvar] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+
+                this.WakeConditionVariable(condvar)?;
+            }
+            "WakeAllConditionVariable" => {
+                let [condvar] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+
+                this.WakeAllConditionVariable(condvar)?;
+            }
 
             // Dynamic symbol loading
             "GetProcAddress" => {

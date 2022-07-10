@@ -183,7 +183,7 @@ pub fn futex<'tcx>(
             if val == futex_val {
                 // The value still matches, so we block the thread make it wait for FUTEX_WAKE.
                 this.block_thread(thread);
-                this.futex_wait(addr_usize, thread, bitset);
+                this.futex_wait(addr_usize, thread, bitset, None);
                 // Succesfully waking up from FUTEX_WAIT always returns zero.
                 this.write_scalar(Scalar::from_machine_isize(0, this), dest)?;
                 // Register a timeout callback if a timeout was specified.
@@ -243,9 +243,9 @@ pub fn futex<'tcx>(
             this.atomic_fence(&[], AtomicFenceOrd::SeqCst)?;
             let mut n = 0;
             for _ in 0..val {
-                if let Some(thread) = this.futex_wake(addr_usize, bitset) {
-                    this.unblock_thread(thread);
-                    this.unregister_timeout_callback_if_exists(thread);
+                if let Some(waiter) = this.futex_wake(addr_usize, bitset) {
+                    this.unblock_thread(waiter.thread);
+                    this.unregister_timeout_callback_if_exists(waiter.thread);
                     n += 1;
                 } else {
                     break;
