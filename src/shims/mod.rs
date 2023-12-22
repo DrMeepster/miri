@@ -14,6 +14,7 @@ pub mod os_str;
 pub mod panic;
 pub mod time;
 pub mod tls;
+pub mod fs;
 
 // End module management, begin local code
 

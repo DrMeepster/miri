@@ -1,4 +1,4 @@
-use crate::shims::unix::fs::FileDescriptor;
+use crate::shims::fs::FileDescriptor;
 
 use rustc_const_eval::interpret::InterpResult;
 use rustc_middle::ty::TyCtxt;
@@ -33,8 +33,8 @@ impl FileDescriptor for Event {
     fn close<'tcx>(
         self: Box<Self>,
         _communicate_allowed: bool,
-    ) -> InterpResult<'tcx, io::Result<i32>> {
-        Ok(Ok(0))
+    ) -> InterpResult<'tcx, io::Result<()>> {
+        Ok(Ok(()))
     }
 
     /// A write call adds the 8-byte integer value supplied in

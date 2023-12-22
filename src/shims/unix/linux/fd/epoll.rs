@@ -1,6 +1,6 @@
 use crate::*;
 
-use crate::shims::unix::fs::FileDescriptor;
+use crate::shims::fs::FileDescriptor;
 
 use rustc_data_structures::fx::FxHashMap;
 use std::io;
@@ -39,7 +39,7 @@ impl FileDescriptor for Epoll {
     fn close<'tcx>(
         self: Box<Self>,
         _communicate_allowed: bool,
-    ) -> InterpResult<'tcx, io::Result<i32>> {
-        Ok(Ok(0))
+    ) -> InterpResult<'tcx, io::Result<()>> {
+        Ok(Ok(()))
     }
 }

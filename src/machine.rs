@@ -31,7 +31,7 @@ use rustc_target::spec::abi::Abi;
 
 use crate::{
     concurrency::{data_race, weak_memory},
-    shims::unix::FileHandler,
+    shims::fs::FileHandler,
     *,
 };
 
@@ -458,9 +458,9 @@ pub struct MiriMachine<'mir, 'tcx> {
     pub(crate) enforce_abi: bool,
 
     /// The table of file descriptors.
-    pub(crate) file_handler: shims::unix::FileHandler,
+    pub(crate) file_handler: shims::fs::FileHandler,
     /// The table of directory descriptors.
-    pub(crate) dir_handler: shims::unix::DirHandler,
+    pub(crate) dir_handler: shims::fs::DirHandler,
 
     /// This machine's monotone clock.
     pub(crate) clock: Clock,
