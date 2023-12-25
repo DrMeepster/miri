@@ -1,5 +1,5 @@
 use std::fs::{remove_file, File, Metadata};
-use std::io;
+use std::io::{self, ErrorKind, SeekFrom};
 
 use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::Size;
@@ -27,7 +27,7 @@ impl FileDescriptor for MetadataHandle {
         _bytes: &mut [u8],
         _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
-        Ok(Err(io::ErrorKind::PermissionDenied.into()))
+        Ok(Err(ErrorKind::PermissionDenied.into()))
     }
 
     fn write<'tcx>(
@@ -36,15 +36,15 @@ impl FileDescriptor for MetadataHandle {
         _bytes: &[u8],
         _tcx: TyCtxt<'tcx>,
     ) -> InterpResult<'tcx, io::Result<usize>> {
-        Ok(Err(io::ErrorKind::PermissionDenied.into()))
+        Ok(Err(ErrorKind::PermissionDenied.into()))
     }
 
     fn seek<'tcx>(
         &mut self,
         _communicate_allowed: bool,
-        _offset: io::SeekFrom,
+        _offset: SeekFrom,
     ) -> InterpResult<'tcx, io::Result<u64>> {
-        Ok(Err(io::ErrorKind::PermissionDenied.into()))
+        Ok(Err(ErrorKind::PermissionDenied.into()))
     }
 
     fn close<'tcx>(
@@ -107,7 +107,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
             this.reject_in_isolation("`CreateFileW`", reject_with)?;
-            this.set_last_error_from_io_error(io::ErrorKind::PermissionDenied)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
             return Ok(this.eval_windows("c", "INVALID_HANDLE_VALUE"));
         }
 
@@ -259,12 +259,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
                 }
                 // abort if the file is created/deleted between the check and now
                 // these errors are not expected by the caller
-                (Err(err), Some(false)) if err.kind() == io::ErrorKind::AlreadyExists => {
+                (Err(err), Some(false)) if err.kind() == ErrorKind::AlreadyExists => {
                     throw_machine_stop!(TerminationInfo::Abort(
                         "file created while creating file in `CreateFileW`".to_string()
                     ))
                 }
-                (Err(err), Some(true)) if err.kind() == io::ErrorKind::NotFound => {
+                (Err(err), Some(true)) if err.kind() == ErrorKind::NotFound => {
                     throw_machine_stop!(TerminationInfo::Abort(
                         "file deleted while opening file in `CreateFileW`".to_string()
                     ))
@@ -292,7 +292,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         } else if which == this.eval_windows_u32("c", "STD_ERROR_HANDLE") {
             Handle::File(2).to_scalar(this)
         } else {
-            this.set_last_error_from_io_error(io::ErrorKind::InvalidInput)?;
+            this.set_last_error_from_io_error(ErrorKind::InvalidInput)?;
             this.eval_windows("c", "INVALID_HANDLE_VALUE")
         };
 
@@ -383,6 +383,64 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         Ok(this.eval_windows("c", "TRUE"))
     }
 
+    fn SetFilePointerEx(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>,       // HANDLE
+        distance_op: &OpTy<'tcx, Provenance>,     // LARGE_INTEGER
+        new_file_ptr_op: &OpTy<'tcx, Provenance>, // PLARGE_INTEGER
+        method_op: &OpTy<'tcx, Provenance>,       // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL  */ {
+        let this = self.eval_context_mut();
+
+        let handle = this.read_handle(handle_op)?;
+        let distance = this.read_scalar(distance_op)?.to_i64()?;
+        let new_file_ptr = this.read_pointer(new_file_ptr_op)?;
+        let method = this.read_scalar(method_op)?.to_u32()?;
+
+        // Isolation check is done via `FileDescriptor` trait.
+        let communicate = this.machine.communicate();
+
+        let file_begin = this.eval_windows_u32("c", "FILE_BEGIN");
+        let file_current = this.eval_windows_u32("c", "FILE_CURRENT");
+        let file_end = this.eval_windows_u32("c", "FILE_END");
+
+        let offset = if method == file_begin {
+            #[allow(clippy::cast_sign_loss)] // intentional
+            SeekFrom::Start(distance as u64)
+        } else if method == file_current {
+            SeekFrom::Current(distance)
+        } else if method == file_end {
+            SeekFrom::End(distance)
+        } else {
+            this.set_last_error_from_io_error(ErrorKind::InvalidInput)?;
+            return Ok(this.eval_windows("c", "FALSE"));
+        };
+
+        let Some(Handle::File(fd)) = handle else {
+            return this.invalid_handle("FALSE");
+        };
+
+        let Some(file) = this.machine.file_handler.handles.get_mut(&fd) else {
+            return this.invalid_handle("FALSE");
+        };
+
+        let result = file.seek(communicate, offset)?;
+
+        match this.try_unwrap_io_result(result)? {
+            Some(file_ptr) => {
+                if !this.ptr_is_null(new_file_ptr)? {
+                    let place = this.deref_pointer_as(
+                        new_file_ptr_op,
+                        this.windows_ty_layout("LARGE_INTEGER"),
+                    )?;
+                    this.write_scalar(Scalar::from_u64(file_ptr), &place)?;
+                }
+                Ok(this.eval_windows("c", "TRUE"))
+            }
+            None => Ok(this.eval_windows("c", "FALSE")),
+        }
+    }
+
     fn DeleteFileW(
         &mut self,
         filename_op: &OpTy<'tcx, Provenance>, // LPCWSTR
@@ -394,7 +452,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
             this.reject_in_isolation("`DeleteFileW`", reject_with)?;
-            this.set_last_error_from_io_error(io::ErrorKind::PermissionDenied)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
             return Ok(this.eval_windows("c", "FALSE"));
         }
 
@@ -548,7 +606,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
 
         let (status, read) = match file.read(communicate, &mut bytes, *this.tcx)? {
             Ok(0) if n > 0 => (this.eval_windows("c", "STATUS_END_OF_FILE"), 0),
-            Ok(read) => (this.eval_windows("c", "STATUS_SUCCESS"), u64::try_from(read).unwrap()),
+            Ok(read) => {
+                this.write_bytes_ptr(buf, bytes)?;
+                (this.eval_windows("c", "STATUS_SUCCESS"), u64::try_from(read).unwrap())
+            }
             Err(error) => (this.io_error_to_ntstatus(error.kind())?, 0),
         };
 
