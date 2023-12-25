@@ -1,4 +1,3 @@
-//@ignore-target-windows: File handling is not implemented yet
 //@compile-flags: -Zmiri-disable-isolation
 
 #![feature(io_error_more)]
@@ -7,8 +6,8 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{
-    canonicalize, create_dir, read_dir, read_link, remove_dir, remove_dir_all, remove_file, rename,
-    File, OpenOptions,
+    canonicalize, create_dir, metadata, read_dir, read_link, remove_dir, remove_dir_all,
+    remove_file, rename, File, OpenOptions,
 };
 use std::io::{Error, ErrorKind, IsTerminal, Read, Result, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -60,7 +59,7 @@ fn prepare_with_content(filename: &str, content: &[u8]) -> PathBuf {
 fn test_path_conversion() {
     let tmp = utils::tmp();
     assert!(tmp.is_absolute(), "{:?} is not absolute", tmp);
-    assert!(tmp.is_dir(), "{:?} is not a directory", tmp);
+    assert!(metadata(&tmp).unwrap().is_dir(), "{:?} is not a directory", tmp);
 }
 
 fn test_file() {

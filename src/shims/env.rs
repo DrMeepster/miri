@@ -434,6 +434,31 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
     }
 
+    #[allow(non_snake_case)]
+    fn GetTempPathW(
+        &mut self,
+        size_op: &OpTy<'tcx, Provenance>, // DWORD
+        buf_op: &OpTy<'tcx, Provenance>,  // LPTSTR
+    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        let this = self.eval_context_mut();
+        this.assert_target_os("windows", "GetTempPathW");
+
+        let size = u64::from(this.read_scalar(size_op)?.to_u32()?);
+        let buf = this.read_pointer(buf_op)?;
+
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`GetCurrentDirectoryW`", reject_with)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(Scalar::from_u32(0));
+        }
+
+        let temp_dir = env::temp_dir();
+
+        Ok(Scalar::from_u32(windows_check_buffer_size(
+            this.write_path_to_wide_str(&temp_dir, buf, size, /*truncate*/ false)?,
+        )))
+    }
+
     /// Updates the `environ` static.
     /// The first time it gets called, also initializes `extra.environ`.
     fn update_environ(&mut self) -> InterpResult<'tcx> {

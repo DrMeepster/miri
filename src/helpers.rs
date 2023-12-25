@@ -611,34 +611,27 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     ) -> InterpResult<'tcx, Scalar<Provenance>> {
         let this = self.eval_context_ref();
         let target = &this.tcx.sess.target;
+
         if target.families.iter().any(|f| f == "unix") {
             for &(name, kind) in UNIX_IO_ERROR_TABLE {
                 if err_kind == kind {
                     return Ok(this.eval_libc(name));
                 }
             }
-            throw_unsup_format!("io error {:?} cannot be translated into a raw os error", err_kind)
         } else if target.families.iter().any(|f| f == "windows") {
-            // FIXME: we have to finish implementing the Windows equivalent of this.
-            use std::io::ErrorKind::*;
-            Ok(this.eval_windows(
-                "c",
-                match err_kind {
-                    NotFound => "ERROR_FILE_NOT_FOUND",
-                    PermissionDenied => "ERROR_ACCESS_DENIED",
-                    _ =>
-                        throw_unsup_format!(
-                            "io error {:?} cannot be translated into a raw os error",
-                            err_kind
-                        ),
-                },
-            ))
+            for &(name, kind) in shims::windows::IO_ERROR_TABLE {
+                if err_kind == kind {
+                    return Ok(this.eval_windows("c", name));
+                }
+            }
         } else {
             throw_unsup_format!(
                 "converting io::Error into errnum is unsupported for OS {}",
                 target.os
             )
         }
+
+        throw_unsup_format!("io error {:?} cannot be translated into a raw os error", err_kind)
     }
 
     /// The inverse of `io_error_to_errnum`.
@@ -673,22 +666,32 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     }
 
     /// Helper function that consumes an `std::io::Result<T>` and returns an
+    /// `InterpResult<'tcx,Option<T>>::Ok` instead. In case the result is an error, this function returns
+    /// `Ok(None)` and sets the last OS error accordingly.
+    fn try_unwrap_io_result<T>(
+        &mut self,
+        result: std::io::Result<T>,
+    ) -> InterpResult<'tcx, Option<T>> {
+        match result {
+            Ok(ok) => Ok(Some(ok)),
+            Err(e) => {
+                self.eval_context_mut().set_last_error_from_io_error(e.kind())?;
+                Ok(None)
+            }
+        }
+    }
+
+    /// Helper function that consumes an `std::io::Result<T>` and returns an
     /// `InterpResult<'tcx,T>::Ok` instead. In case the result is an error, this function returns
     /// `Ok(-1)` and sets the last OS error accordingly.
     ///
     /// This function uses `T: From<i32>` instead of `i32` directly because some IO related
     /// functions return different integer types (like `read`, that returns an `i64`).
-    fn try_unwrap_io_result<T: From<i32>>(
+    fn try_unwrap_io_result_unix<T: From<i32>>(
         &mut self,
         result: std::io::Result<T>,
     ) -> InterpResult<'tcx, T> {
-        match result {
-            Ok(ok) => Ok(ok),
-            Err(e) => {
-                self.eval_context_mut().set_last_error_from_io_error(e.kind())?;
-                Ok((-1).into())
-            }
-        }
+        self.try_unwrap_io_result(result).map(|o| o.unwrap_or((-1).into()))
     }
 
     /// Dereference a pointer operand to a place using `layout` instead of the pointer's declared type
@@ -1195,4 +1198,13 @@ pub(crate) fn round_to_next_multiple_of(x: u64, divisor: u64) -> u64 {
     // divisor is nonzero; multiplication cannot overflow since we just divided
     #[allow(clippy::arithmetic_side_effects)]
     return (x.checked_add(divisor - 1).unwrap() / divisor) * divisor;
+}
+
+/// splits a `u64` into `(low_order, high_order)` components
+pub(crate) fn split_u64(x: u64) -> (u32, u32) {
+    #[allow(clippy::cast_possible_truncation)] // truncation is intentional
+    let low_order = x as u32;
+    let high_order = (x >> 32) as u32;
+
+    (low_order, high_order)
 }

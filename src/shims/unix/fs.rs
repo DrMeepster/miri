@@ -244,7 +244,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             fh.insert_fd(Box::new(FileHandle { file, writable }))
         });
 
-        this.try_unwrap_io_result(fd)
+        this.try_unwrap_io_result_unix(fd)
     }
 
     fn fcntl(&mut self, args: &[OpTy<'tcx, Provenance>]) -> InterpResult<'tcx, i32> {
@@ -317,7 +317,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                         )
                     })?;
                 let io_result = maybe_sync_file(file, *writable, File::sync_all);
-                this.try_unwrap_io_result(io_result)
+                this.try_unwrap_io_result_unix(io_result)
             } else {
                 this.handle_not_found()
             }
@@ -334,7 +334,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         Ok(Scalar::from_i32(
             if let Some(file_descriptor) = this.machine.file_handler.handles.remove(&fd) {
                 let result = file_descriptor.close(this.machine.communicate())?;
-                this.try_unwrap_io_result(result.map(|_| 0i32))?
+                this.try_unwrap_io_result_unix(result.map(|_| 0i32))?
             } else {
                 this.handle_not_found()?
             },
@@ -428,7 +428,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             let result = file_descriptor
                 .write(communicate, bytes, *this.tcx)?
                 .map(|c| i64::try_from(c).unwrap());
-            this.try_unwrap_io_result(result)
+            this.try_unwrap_io_result_unix(result)
         } else {
             this.handle_not_found()
         }
@@ -466,7 +466,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = file_descriptor
                     .seek(communicate, seek_from)?
                     .map(|offset| i64::try_from(offset).unwrap());
-                this.try_unwrap_io_result(result)?
+                this.try_unwrap_io_result_unix(result)?
             } else {
                 this.handle_not_found()?
             },
@@ -486,7 +486,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
 
         let result = remove_file(path).map(|_| 0);
-        this.try_unwrap_io_result(result)
+        this.try_unwrap_io_result_unix(result)
     }
 
     fn symlink(
@@ -517,7 +517,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         }
 
         let result = create_link(&target, &linkpath).map(|_| 0);
-        this.try_unwrap_io_result(result)
+        this.try_unwrap_io_result_unix(result)
     }
 
     fn macos_stat(
@@ -811,7 +811,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let result = rename(oldpath, newpath).map(|_| 0);
 
-        this.try_unwrap_io_result(result)
+        this.try_unwrap_io_result_unix(result)
     }
 
     fn mkdir(
@@ -850,7 +850,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let result = builder.create(path).map(|_| 0i32);
 
-        this.try_unwrap_io_result(result)
+        this.try_unwrap_io_result_unix(result)
     }
 
     fn rmdir(&mut self, path_op: &OpTy<'tcx, Provenance>) -> InterpResult<'tcx, i32> {
@@ -867,7 +867,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let result = remove_dir(path).map(|_| 0i32);
 
-        this.try_unwrap_io_result(result)
+        this.try_unwrap_io_result_unix(result)
     }
 
     fn opendir(
@@ -1135,7 +1135,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 if *writable {
                     if let Ok(length) = length.try_into() {
                         let result = file.set_len(length);
-                        this.try_unwrap_io_result(result.map(|_| 0i32))?
+                        this.try_unwrap_io_result_unix(result.map(|_| 0i32))?
                     } else {
                         let einval = this.eval_libc("EINVAL");
                         this.set_last_error(einval)?;
@@ -1177,7 +1177,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     err_unsup_format!("`fsync` is only supported on file-backed file descriptors")
                 })?;
             let io_result = maybe_sync_file(file, *writable, File::sync_all);
-            this.try_unwrap_io_result(io_result)
+            this.try_unwrap_io_result_unix(io_result)
         } else {
             this.handle_not_found()
         }
@@ -1204,7 +1204,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     )
                 })?;
             let io_result = maybe_sync_file(file, *writable, File::sync_data);
-            this.try_unwrap_io_result(io_result)
+            this.try_unwrap_io_result_unix(io_result)
         } else {
             this.handle_not_found()
         }
@@ -1254,7 +1254,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     )
                 })?;
             let io_result = maybe_sync_file(file, *writable, File::sync_data);
-            Ok(Scalar::from_i32(this.try_unwrap_io_result(io_result)?))
+            Ok(Scalar::from_i32(this.try_unwrap_io_result_unix(io_result)?))
         } else {
             Ok(Scalar::from_i32(this.handle_not_found()?))
         }

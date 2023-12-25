@@ -2,6 +2,7 @@ use rustc_middle::ty::layout::LayoutOf;
 use rustc_target::spec::abi::Abi;
 
 use crate::*;
+use shims::windows::error::win32_error_to_hresult;
 use shims::windows::handle::{EvalContextExt as _, Handle, PseudoHandle};
 
 impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
@@ -59,18 +60,18 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         &mut self,
         handle_op: &OpTy<'tcx, Provenance>,
         timeout_op: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, u32> {
+    ) -> InterpResult<'tcx, Scalar<Provenance>> {
         let this = self.eval_context_mut();
 
-        let handle = this.read_scalar(handle_op)?;
+        let handle = this.read_handle(handle_op)?;
         let timeout = this.read_scalar(timeout_op)?.to_u32()?;
 
-        let thread = match Handle::from_scalar(handle, this)? {
+        let thread = match handle {
             Some(Handle::Thread(thread)) => thread,
             // Unlike on posix, the outcome of joining the current thread is not documented.
             // On current Windows, it just deadlocks.
             Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.get_active_thread(),
-            _ => this.invalid_handle("WaitForSingleObject")?,
+            _ => return this.invalid_handle("WAIT_FAILED"),
         };
 
         if timeout != this.eval_windows_u32("c", "INFINITE") {
@@ -79,6 +80,33 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         this.join_thread(thread)?;
 
-        Ok(0)
+        Ok(this.eval_windows("c", "WAIT_OBJECT_0"))
+    }
+
+    fn SetThreadDescription(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>,
+        name_op: &OpTy<'tcx, Provenance>,
+    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        let this = self.eval_context_mut();
+
+        let handle = this.read_handle(handle_op)?;
+        let name = this.read_wide_str(this.read_pointer(name_op)?)?;
+
+        let thread = match handle {
+            Some(Handle::Thread(thread)) => thread,
+            Some(Handle::Pseudo(PseudoHandle::CurrentThread)) => this.get_active_thread(),
+            _ => {
+                // this function uses HRESULT instead of SetLastError
+                let invalid_handle =
+                    win32_error_to_hresult(this.eval_windows_u32("c", "ERROR_INVALID_HANDLE"));
+                return Ok(Scalar::from_u32(invalid_handle));
+            }
+        };
+
+        this.set_thread_name_wide(thread, &name);
+
+        // S_OK
+        Ok(Scalar::from_u32(0))
     }
 }

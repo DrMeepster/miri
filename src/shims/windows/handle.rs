@@ -14,6 +14,7 @@ pub enum Handle {
     Null,
     Pseudo(PseudoHandle),
     Thread(ThreadId),
+    File(i32),
 }
 
 impl PseudoHandle {
@@ -37,12 +38,14 @@ impl Handle {
     const NULL_DISCRIMINANT: u32 = 0;
     const PSEUDO_DISCRIMINANT: u32 = 1;
     const THREAD_DISCRIMINANT: u32 = 2;
+    const FILE_DISCRIMINANT: u32 = 3;
 
     fn discriminant(self) -> u32 {
         match self {
             Self::Null => Self::NULL_DISCRIMINANT,
             Self::Pseudo(_) => Self::PSEUDO_DISCRIMINANT,
             Self::Thread(_) => Self::THREAD_DISCRIMINANT,
+            Self::File(_) => Self::FILE_DISCRIMINANT,
         }
     }
 
@@ -51,13 +54,19 @@ impl Handle {
             Self::Null => 0,
             Self::Pseudo(pseudo_handle) => pseudo_handle.value(),
             Self::Thread(thread) => thread.to_u32(),
+            #[allow(clippy::cast_sign_loss)] // we want to lose the sign
+            Self::File(file) => file as u32,
         }
     }
 
     fn packed_disc_size() -> u32 {
-        // ceil(log2(x)) is how many bits it takes to store x numbers
-        let variant_count = variant_count::<Self>();
+        // we add one to the variant count to ensure the all ones discriminant is never valid
+        // ensuring that INVALID_HANDLE_VALUE (0xFFFFFFFF) is never a valid handle
+        // see https://devblogs.microsoft.com/oldnewthing/20230914-00/?p=108766
+        #[allow(clippy::arithmetic_side_effects)] // cannot overflow
+        let variant_count = variant_count::<Self>() + 1;
 
+        // ceil(log2(x)) is how many bits it takes to store x numbers
         // however, std's ilog2 is floor(log2(x))
         let floor_log2 = variant_count.ilog2();
 
@@ -96,6 +105,8 @@ impl Handle {
             Self::NULL_DISCRIMINANT if data == 0 => Some(Self::Null),
             Self::PSEUDO_DISCRIMINANT => Some(Self::Pseudo(PseudoHandle::from_value(data)?)),
             Self::THREAD_DISCRIMINANT => Some(Self::Thread(data.into())),
+            #[allow(clippy::cast_possible_wrap)]
+            Self::FILE_DISCRIMINANT => Some(Self::File(data as i32)),
             _ => None,
         }
     }
@@ -149,23 +160,42 @@ impl<'mir, 'tcx> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> 
 
 #[allow(non_snake_case)]
 pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
-    fn invalid_handle(&mut self, function_name: &str) -> InterpResult<'tcx, !> {
-        throw_machine_stop!(TerminationInfo::Abort(format!(
-            "invalid handle passed to `{function_name}`"
-        )))
-    }
-
-    fn CloseHandle(&mut self, handle_op: &OpTy<'tcx, Provenance>) -> InterpResult<'tcx> {
+    fn read_handle(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>,
+    ) -> InterpResult<'tcx, Option<Handle>> {
         let this = self.eval_context_mut();
 
-        let handle = this.read_scalar(handle_op)?;
+        let scalar = this.read_scalar(handle_op)?;
 
-        match Handle::from_scalar(handle, this)? {
-            Some(Handle::Thread(thread)) =>
-                this.detach_thread(thread, /*allow_terminated_joined*/ true)?,
-            _ => this.invalid_handle("CloseHandle")?,
+        Handle::from_scalar(scalar, this)
+    }
+
+    /// Helper function to set the last error to `ERROR_INVALID_HANDLE` and return the named `windows` constant
+    fn invalid_handle(
+        &mut self,
+        return_value_name: &str,
+    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        let this = self.eval_context_mut();
+
+        let ERROR_INVALID_HANDLE = this.eval_windows("c", "ERROR_INVALID_HANDLE");
+        this.set_last_error(ERROR_INVALID_HANDLE)?;
+
+        Ok(this.eval_windows("c", return_value_name))
+    }
+
+    fn CloseHandle(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>,
+    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        let this = self.eval_context_mut();
+
+        match this.read_handle(handle_op)? {
+            Some(Handle::Thread(thread)) => {
+                this.detach_thread(thread, /*allow_terminated_joined*/ true)?;
+                Ok(this.eval_windows("c", "TRUE"))
+            }
+            _ => this.invalid_handle("FALSE"),
         }
-
-        Ok(())
     }
 }

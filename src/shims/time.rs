@@ -1,6 +1,7 @@
 use std::time::{Duration, SystemTime};
 
 use crate::concurrency::thread::MachineCallback;
+use crate::helpers::split_u64;
 use crate::*;
 
 /// Returns the time elapsed between the provided time and the unix epoch as a `Duration`.
@@ -108,6 +109,24 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     }
 
     #[allow(non_snake_case, clippy::arithmetic_side_effects)]
+    fn system_time_to_windows_filetime(&self, system_time: &SystemTime) -> InterpResult<'tcx, u64> {
+        let this = self.eval_context_ref();
+
+        let NANOS_PER_SEC = this.eval_windows_u64("time", "NANOS_PER_SEC");
+        let INTERVALS_PER_SEC = this.eval_windows_u64("time", "INTERVALS_PER_SEC");
+        let INTERVALS_TO_UNIX_EPOCH = this.eval_windows_u64("time", "INTERVALS_TO_UNIX_EPOCH");
+        let NANOS_PER_INTERVAL = NANOS_PER_SEC / INTERVALS_PER_SEC;
+        let SECONDS_TO_UNIX_EPOCH = INTERVALS_TO_UNIX_EPOCH / INTERVALS_PER_SEC;
+
+        let duration =
+            system_time_to_duration(system_time)? + Duration::from_secs(SECONDS_TO_UNIX_EPOCH);
+        let duration_ticks = u64::try_from(duration.as_nanos() / u128::from(NANOS_PER_INTERVAL))
+            .map_err(|_| err_unsup_format!("programs running more than 2^64 Windows ticks after the Windows epoch are not supported"))?;
+
+        Ok(duration_ticks)
+    }
+
+    #[allow(non_snake_case)]
     fn GetSystemTimeAsFileTime(
         &mut self,
         LPFILETIME_op: &OpTy<'tcx, Provenance>,
@@ -119,19 +138,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let filetime = this.deref_pointer_as(LPFILETIME_op, this.windows_ty_layout("FILETIME"))?;
 
-        let NANOS_PER_SEC = this.eval_windows_u64("time", "NANOS_PER_SEC");
-        let INTERVALS_PER_SEC = this.eval_windows_u64("time", "INTERVALS_PER_SEC");
-        let INTERVALS_TO_UNIX_EPOCH = this.eval_windows_u64("time", "INTERVALS_TO_UNIX_EPOCH");
-        let NANOS_PER_INTERVAL = NANOS_PER_SEC / INTERVALS_PER_SEC;
-        let SECONDS_TO_UNIX_EPOCH = INTERVALS_TO_UNIX_EPOCH / INTERVALS_PER_SEC;
+        let date_time = this.system_time_to_windows_filetime(&SystemTime::now())?;
 
-        let duration = system_time_to_duration(&SystemTime::now())?
-            + Duration::from_secs(SECONDS_TO_UNIX_EPOCH);
-        let duration_ticks = u64::try_from(duration.as_nanos() / u128::from(NANOS_PER_INTERVAL))
-            .map_err(|_| err_unsup_format!("programs running more than 2^64 Windows ticks after the Windows epoch are not supported"))?;
+        let (dwLowDateTime, dwHighDateTime) = split_u64(date_time);
 
-        let dwLowDateTime = u32::try_from(duration_ticks & 0x00000000FFFFFFFF).unwrap();
-        let dwHighDateTime = u32::try_from((duration_ticks & 0xFFFFFFFF00000000) >> 32).unwrap();
         this.write_int_fields(&[dwLowDateTime.into(), dwHighDateTime.into()], &filetime)?;
 
         Ok(())
