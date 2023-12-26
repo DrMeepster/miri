@@ -2,6 +2,7 @@ use std::any::Any;
 use std::collections::BTreeMap;
 use std::fs::{File, ReadDir};
 use std::io::{self, IsTerminal, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 
 use rustc_data_structures::fx::FxHashMap;
 use rustc_middle::ty::TyCtxt;
@@ -12,6 +13,7 @@ use crate::*;
 pub struct FileHandle {
     pub file: File,
     pub writable: bool,
+    pub path: PathBuf,
 }
 
 pub trait FileDescriptor: std::fmt::Debug + Any {
@@ -61,6 +63,10 @@ pub trait FileDescriptor: std::fmt::Debug + Any {
 
     fn is_tty(&self, _communicate_allowed: bool) -> bool {
         false
+    }
+
+    fn path(&self) -> Option<&Path> {
+        None
     }
 }
 
@@ -146,11 +152,19 @@ impl FileDescriptor for FileHandle {
 
     fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
         let duplicated = self.file.try_clone()?;
-        Ok(Box::new(FileHandle { file: duplicated, writable: self.writable }))
+        Ok(Box::new(FileHandle {
+            file: duplicated,
+            writable: self.writable,
+            path: self.path.clone(),
+        }))
     }
 
     fn is_tty(&self, communicate_allowed: bool) -> bool {
         communicate_allowed && self.file.is_terminal()
+    }
+
+    fn path(&self) -> Option<&Path> {
+        Some(&self.path)
     }
 }
 

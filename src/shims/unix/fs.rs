@@ -230,7 +230,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             throw_unsup_format!("unsupported flags {:#x}", flag & !mirror);
         }
 
-        let path = this.read_path_from_c_str(path)?;
+        let path = this.read_path_from_c_str(path)?.into_owned();
 
         // Reject if isolation is enabled.
         if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
@@ -239,10 +239,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             return Ok(-1);
         }
 
-        let fd = options.open(path).map(|file| {
-            let fh = &mut this.machine.file_handler;
-            fh.insert_fd(Box::new(FileHandle { file, writable }))
-        });
+        let fh = &mut this.machine.file_handler;
+        let fd = options
+            .open(&path)
+            .map(move |file| fh.insert_fd(Box::new(FileHandle { file, writable, path })));
 
         this.try_unwrap_io_result_unix(fd)
     }
@@ -310,7 +310,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
             if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
                 // FIXME: Support fullfsync for all FDs
-                let FileHandle { file, writable } =
+                let FileHandle { file, writable, .. } =
                     file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
                         err_unsup_format!(
                             "`F_FULLFSYNC` is only supported on file-backed file descriptors"
@@ -1126,7 +1126,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         Ok(Scalar::from_i32(
             if let Some(file_descriptor) = this.machine.file_handler.handles.get_mut(&fd) {
                 // FIXME: Support ftruncate64 for all FDs
-                let FileHandle { file, writable } =
+                let FileHandle { file, writable, .. } =
                     file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
                         err_unsup_format!(
                             "`ftruncate64` is only supported on file-backed file descriptors"
@@ -1172,7 +1172,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             // FIXME: Support fsync for all FDs
-            let FileHandle { file, writable } =
+            let FileHandle { file, writable, .. } =
                 file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
                     err_unsup_format!("`fsync` is only supported on file-backed file descriptors")
                 })?;
@@ -1197,7 +1197,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             // FIXME: Support fdatasync for all FDs
-            let FileHandle { file, writable } =
+            let FileHandle { file, writable, .. } =
                 file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
                     err_unsup_format!(
                         "`fdatasync` is only supported on file-backed file descriptors"
@@ -1247,7 +1247,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         if let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) {
             // FIXME: Support sync_data_range for all FDs
-            let FileHandle { file, writable } =
+            let FileHandle { file, writable, .. } =
                 file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
                     err_unsup_format!(
                         "`sync_data_range` is only supported on file-backed file descriptors"
@@ -1487,12 +1487,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
             let possibly_unique = std::env::temp_dir().join::<PathBuf>(p.into());
 
-            let file = fopts.open(possibly_unique);
+            let file = fopts.open(&possibly_unique);
 
             match file {
                 Ok(f) => {
                     let fh = &mut this.machine.file_handler;
-                    let fd = fh.insert_fd(Box::new(FileHandle { file: f, writable: true }));
+                    let fd = fh.insert_fd(Box::new(FileHandle {
+                        file: f,
+                        writable: true,
+                        path: possibly_unique,
+                    }));
                     return Ok(fd);
                 }
                 Err(e) =>

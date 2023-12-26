@@ -1,10 +1,11 @@
 use std::fs::{remove_file, File, Metadata};
 use std::io::{self, ErrorKind, SeekFrom};
+use std::path::{self, PathBuf};
 
 use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::Size;
 
-use crate::helpers::split_u64;
+use crate::helpers::{split_u64, windows_check_buffer_size};
 use crate::shims::fs::{FileDescriptor, FileHandle};
 use crate::shims::windows::error::EvalContextExt as _;
 use crate::shims::windows::handle::{EvalContextExt as _, Handle};
@@ -14,6 +15,7 @@ use crate::*;
 #[derive(Debug)]
 struct MetadataHandle {
     data: Metadata,
+    path: PathBuf,
 }
 
 impl FileDescriptor for MetadataHandle {
@@ -64,12 +66,16 @@ impl FileDescriptor for MetadataHandle {
     }
 
     fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
-        Ok(Box::new(MetadataHandle { data: self.data.clone() }))
+        Ok(Box::new(MetadataHandle { data: self.data.clone(), path: self.path.clone() }))
     }
 
     // technically, this should fail
     fn is_tty(&self, _communicate_allowed: bool) -> bool {
         false
+    }
+
+    fn path(&self) -> Option<&std::path::Path> {
+        Some(&self.path)
     }
 }
 
@@ -190,11 +196,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
 
             match this.try_unwrap_io_result(result)? {
                 Some(data) => {
-                    let id = this.machine.file_handler.insert_fd(Box::new(MetadataHandle { data }));
+                    let id = this
+                        .machine
+                        .file_handler
+                        .insert_fd(Box::new(MetadataHandle { data, path }));
 
                     Ok(Handle::File(id).to_scalar(this))
                 }
-                None => Ok(Handle::Null.to_scalar(this)),
+                None => Ok(this.eval_windows("c", "INVALID_HANDLE_VALUE")),
             }
         } else {
             // CREATE_ALWAYS and OPEN_ALWAYS set the last error when the file already exists
@@ -248,12 +257,13 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
                 None
             };
 
-            match (options.open(path), already_exists) {
+            match (options.open(&path), already_exists) {
                 (Ok(file), _) => {
-                    let id = this
-                        .machine
-                        .file_handler
-                        .insert_fd(Box::new(FileHandle { file, writable }));
+                    let id = this.machine.file_handler.insert_fd(Box::new(FileHandle {
+                        file,
+                        writable,
+                        path,
+                    }));
 
                     Ok(Handle::File(id).to_scalar(this))
                 }
@@ -271,7 +281,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
                 }
                 (Err(err), _) => {
                     this.set_last_error_from_io_error(err.kind())?;
-                    Ok(Handle::Null.to_scalar(this))
+                    Ok(this.eval_windows("c", "INVALID_HANDLE_VALUE"))
                 }
             }
         }
@@ -618,5 +628,94 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         this.write_scalar(status, &io_status_status)?;
 
         Ok(status)
+    }
+
+    fn GetFinalPathNameByHandleW(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>, // HANDLE
+        buf_op: &OpTy<'tcx, Provenance>,    // LPWSTR
+        size_op: &OpTy<'tcx, Provenance>,   // DWORD
+        flags_op: &OpTy<'tcx, Provenance>,  // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* DWORD */ {
+        let this = self.eval_context_mut();
+
+        let handle = this.read_handle(handle_op)?;
+        let buf = this.read_pointer(buf_op)?;
+        let size = u64::from(this.read_scalar(size_op)?.to_u32()?);
+        let flags = this.read_scalar(flags_op)?.to_u32()?;
+
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`GetFinalPathNameByHandleW`", reject_with)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(Scalar::from_u32(0));
+        }
+
+        if flags != this.eval_windows_u32("c", "VOLUME_NAME_DOS") {
+            throw_unsup_format!("unsupported `dwFlags` {flags:#x} in `GetFinalPathNameByHandleW`");
+        }
+
+        let Some(Handle::File(fd)) = handle else {
+            this.set_last_error(this.eval_windows("c", "ERROR_INVALID_HANDLE"))?;
+            return Ok(Scalar::from_u32(0));
+        };
+
+        let Some(file) = this.machine.file_handler.handles.get(&fd) else {
+            this.set_last_error(this.eval_windows("c", "ERROR_INVALID_HANDLE"))?;
+            return Ok(Scalar::from_u32(0));
+        };
+
+        let Some(path) = file.path() else {
+            // FIXME not sure what error code is best here
+            // this is what real windows returns when you call this on a stdin/out handle
+            this.set_last_error(this.eval_windows("c", "ERROR_INVALID_FUNCTION"))?;
+            return Ok(Scalar::from_u32(0));
+        };
+
+        let Some(canon_path) = this.try_unwrap_io_result(path.canonicalize())? else {
+            return Ok(Scalar::from_u32(0));
+        };
+
+        Ok(Scalar::from_u32(windows_check_buffer_size(this.write_path_to_wide_str(
+            &canon_path,
+            buf,
+            size,
+            /*truncate*/ false,
+        )?)))
+    }
+
+    fn GetFullPathNameW(
+        &mut self,
+        filename_op: &OpTy<'tcx, Provenance>, // LPCWSTR
+        size_op: &OpTy<'tcx, Provenance>,     // DWORD
+        buf_op: &OpTy<'tcx, Provenance>,      // LPWSTR
+        filepart_op: &OpTy<'tcx, Provenance>, // LPWSTR
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* DWORD */ {
+        let this = self.eval_context_mut();
+
+        let path = this.read_path_from_wide_str(this.read_pointer(filename_op)?)?;
+        let size = u64::from(this.read_scalar(size_op)?.to_u32()?);
+        let buf = this.read_pointer(buf_op)?;
+        let filepart = this.read_pointer(filepart_op)?;
+
+        if !this.ptr_is_null(filepart)? {
+            throw_unsup_format!("non-null `lpFilePart` in `GetFullPathNameW`");
+        }
+
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`GetFullPathNameW`", reject_with)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(Scalar::from_u32(0));
+        }
+
+        let Some(absolute_path) = this.try_unwrap_io_result(path::absolute(path))? else {
+            return Ok(Scalar::from_u32(0));
+        };
+
+        Ok(Scalar::from_u32(windows_check_buffer_size(this.write_path_to_wide_str(
+            &absolute_path,
+            buf,
+            size,
+            /*truncate*/ false,
+        )?)))
     }
 }

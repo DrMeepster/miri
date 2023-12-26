@@ -11,6 +11,7 @@
 #![feature(round_ties_even)]
 #![feature(let_chains)]
 #![feature(lint_reasons)]
+#![feature(absolute_path)]
 #![cfg_attr(bootstrap, feature(trait_upcasting))]
 // Configure clippy and other lints
 #![allow(

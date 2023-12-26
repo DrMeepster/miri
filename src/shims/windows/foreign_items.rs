@@ -155,6 +155,18 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 )?;
                 this.write_scalar(result, dest)?;
             }
+            "GetFinalPathNameByHandleW" => {
+                let [handle, buf, size, flags] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.GetFinalPathNameByHandleW(handle, buf, size, flags)?;
+                this.write_scalar(result, dest)?;
+            }
+            "GetFullPathNameW" => {
+                let [filename, buf, size, filepart] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.GetFullPathNameW(filename, buf, size, filepart)?;
+                this.write_scalar(result, dest)?;
+            }
 
             // Allocation
             "HeapAlloc" => {

@@ -315,22 +315,25 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             // We also have to ensure that absolute paths remain absolute.
             match direction {
                 PathConversion::HostToTarget => {
-                    // If this start withs a `\`, we add `\\?` so it starts with `\\?\` which is
+                    // If this start withs a `\`, we add `\\?\C:` so it starts with `\\?\C:\` which is
                     // some magic path on Windows that *is* considered absolute.
                     if converted.get(0).copied() == Some(b'\\') {
-                        converted.splice(0..0, b"\\\\?".iter().copied());
+                        converted.splice(0..0, b"\\\\?\\C:".iter().copied());
                     }
                 }
                 PathConversion::TargetToHost => {
-                    // If this starts with `//?/`, it was probably produced by the above code and we
-                    // remove the `//?` that got added to get the Unix path back out.
+                    // If this starts with `//?/C:/`, it was probably produced by the above code and we
+                    // remove the `//?C:` that got added to get the Unix path back out.
                     if converted.get(0).copied() == Some(b'/')
                         && converted.get(1).copied() == Some(b'/')
                         && converted.get(2).copied() == Some(b'?')
                         && converted.get(3).copied() == Some(b'/')
+                        && converted.get(4).copied() == Some(b'C')
+                        && converted.get(5).copied() == Some(b':')
+                        && converted.get(6).copied() == Some(b'/')
                     {
                         // Remove first 3 characters
-                        converted.splice(0..3, std::iter::empty());
+                        converted.splice(0..6, std::iter::empty());
                     }
                 }
             }
