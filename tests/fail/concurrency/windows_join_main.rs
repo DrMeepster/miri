@@ -7,20 +7,44 @@
 use std::thread;
 
 extern "system" {
+    fn GetCurrentProcess() -> isize;
+    fn GetCurrentThread() -> isize;
+    fn DuplicateHandle(
+        src_proc: isize,
+        src_handle: isize,
+        dst_proc: isize,
+        dst_handle: *mut isize,
+        access: u32,
+        inherit: u32,
+        options: u32,
+    ) -> u32;
     fn WaitForSingleObject(handle: isize, timeout: u32) -> u32;
 }
 
+const DUPLICATE_SAME_ACCESS: u32 = 2;
 const INFINITE: u32 = u32::MAX;
 
-// XXX HACK: This is how miri represents the handle for thread 0.
-// This value can be "legitimately" obtained by using `GetCurrentThread` with `DuplicateHandle`
-// but miri does not implement `DuplicateHandle` yet.
-const MAIN_THREAD: isize = (2i32 << 30) as isize;
-
 fn main() {
-    thread::spawn(|| {
+    let mut main_thread = 0;
+
+    unsafe {
+        assert_eq!(
+            DuplicateHandle(
+                GetCurrentProcess(),
+                GetCurrentThread(),
+                GetCurrentProcess(),
+                &mut main_thread,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS
+            ),
+            1
+        );
+    }
+
+    thread::spawn(move || {
         unsafe {
-            assert_eq!(WaitForSingleObject(MAIN_THREAD, INFINITE), 0); //~ ERROR: deadlock: the evaluated program deadlocked
+            assert_eq!(WaitForSingleObject(main_thread, INFINITE), 0); //~ ERROR: deadlock: the evaluated program deadlocked
         }
     })
     .join()

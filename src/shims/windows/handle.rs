@@ -6,6 +6,7 @@ use crate::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PseudoHandle {
     CurrentThread,
+    CurrentProcess,
 }
 
 /// Miri representation of a Windows `HANDLE`
@@ -18,17 +19,17 @@ pub enum Handle {
 }
 
 impl PseudoHandle {
-    const CURRENT_THREAD_VALUE: u32 = 0;
-
     fn value(self) -> u32 {
-        match self {
-            Self::CurrentThread => Self::CURRENT_THREAD_VALUE,
-        }
+        self as u32
     }
 
     fn from_value(value: u32) -> Option<Self> {
+        const CURRENT_THREAD_VALUE: u32 = PseudoHandle::CurrentThread as u32;
+        const CURRENT_PROCESS_VALUE: u32 = PseudoHandle::CurrentProcess as u32;
+
         match value {
-            Self::CURRENT_THREAD_VALUE => Some(Self::CurrentThread),
+            CURRENT_THREAD_VALUE => Some(Self::CurrentThread),
+            CURRENT_PROCESS_VALUE => Some(Self::CurrentProcess),
             _ => None,
         }
     }
@@ -154,6 +155,17 @@ impl Handle {
 
         Ok(Self::from_packed(handle))
     }
+
+    // FIXME should this be the display trait?
+    fn describe_kind(&self) -> &'static str {
+        match self {
+            Self::Null => "null handle",
+            Self::Pseudo(PseudoHandle::CurrentThread) => "current thread pseudohandle",
+            Self::Pseudo(PseudoHandle::CurrentProcess) => "current process pseudohandle",
+            Self::Thread(_) => "thread handle",
+            Self::File(_) => "file handle",
+        }
+    }
 }
 
 impl<'mir, 'tcx> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
@@ -184,10 +196,68 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         Ok(this.eval_windows("c", return_value_name))
     }
 
+    fn DuplicateHandle(
+        &mut self,
+        src_process_op: &OpTy<'tcx, Provenance>, // HANDLE
+        src_handle_op: &OpTy<'tcx, Provenance>,  // HANDLE
+        dst_process_op: &OpTy<'tcx, Provenance>, // HANDLE
+        dst_handle_op: &OpTy<'tcx, Provenance>,  // LPHANDLE
+        access_op: &OpTy<'tcx, Provenance>,      // DWORD
+        inherit_op: &OpTy<'tcx, Provenance>,     // BOOL
+        options_op: &OpTy<'tcx, Provenance>,     // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
+        let this = self.eval_context_mut();
+
+        let src_process = this.read_handle(src_process_op)?;
+        let src_handle = this.read_handle(src_handle_op)?;
+        let dst_process = this.read_handle(dst_process_op)?;
+        let dst_handle = this.read_pointer(dst_handle_op)?;
+        this.read_scalar(access_op)?.to_u32()?; // ignored: we require DUPLICATE_SAME_ACCESS
+        this.read_scalar(inherit_op)?.to_u32()?; // ignored: inheriting handles is not possible
+        let options = this.read_scalar(options_op)?.to_u32()?;
+
+        if [src_process, dst_process] != [Some(Handle::Pseudo(PseudoHandle::CurrentProcess)); 2] {
+            return this.invalid_handle("FALSE");
+        }
+
+        if options != this.eval_windows_u32("c", "DUPLICATE_SAME_ACCESS") {
+            throw_unsup_format!("unsupported `dwOptions` {options:#x} in `DuplicateHandle`");
+        }
+
+        let new_handle = match src_handle {
+            Some(Handle::Pseudo(PseudoHandle::CurrentThread)) =>
+                Handle::Thread(this.get_active_thread()),
+            Some(Handle::File(fd)) => {
+                let Some(file) = this.machine.file_handler.handles.get_mut(&fd) else {
+                    return this.invalid_handle("FALSE");
+                };
+
+                let result = file.dup();
+
+                match this.try_unwrap_io_result(result)? {
+                    Some(dupped_file) => {
+                        let fd = this.machine.file_handler.insert_fd(dupped_file);
+                        Handle::File(fd)
+                    }
+                    None => return this.invalid_handle("FALSE"),
+                }
+            }
+            Some(Handle::Null) | None => return this.invalid_handle("FALSE"),
+            Some(handle) => throw_unsup_format!("cannot duplicate {}", handle.describe_kind()),
+        };
+
+        if !this.ptr_is_null(dst_handle)? {
+            let place = this.deref_pointer_as(dst_handle_op, this.windows_ty_layout("HANDLE"))?;
+            this.write_scalar(new_handle.to_scalar(this), &place)?;
+        }
+
+        Ok(this.eval_windows("c", "TRUE"))
+    }
+
     fn CloseHandle(
         &mut self,
-        handle_op: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        handle_op: &OpTy<'tcx, Provenance>, // HANDLE
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
         let this = self.eval_context_mut();
 
         match this.read_handle(handle_op)? {

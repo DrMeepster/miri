@@ -2,7 +2,6 @@ use std::iter;
 use std::str;
 
 use rustc_span::Symbol;
-use rustc_target::abi::Size;
 use rustc_target::spec::abi::Abi;
 
 use crate::*;
@@ -506,6 +505,20 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.GetStdHandle(which)?;
                 this.write_scalar(result, dest)?;
             }
+            "DuplicateHandle" => {
+                let [src_process, src_handle, dst_process, dst_handle, access, inherit, options] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.DuplicateHandle(
+                    src_process,
+                    src_handle,
+                    dst_process,
+                    dst_handle,
+                    access,
+                    inherit,
+                    options,
+                )?;
+                this.write_scalar(result, dest)?;
+            }
             "CloseHandle" => {
                 let [handle] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
@@ -551,6 +564,13 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let insufficient_buffer = this.eval_windows("c", "ERROR_INSUFFICIENT_BUFFER");
                     this.set_last_error(insufficient_buffer)?;
                 }
+            }
+            "GetCurrentProcess" => {
+                let [] = this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                this.write_scalar(
+                    Handle::Pseudo(PseudoHandle::CurrentProcess).to_scalar(this),
+                    dest,
+                )?;
             }
 
             // Incomplete shims that we "stub out" just to get pre-main initialization code to work.
