@@ -1143,8 +1143,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     }
                 } else {
                     // The file is not writable
-                    let einval = this.eval_libc("EINVAL");
-                    this.set_last_error(einval)?;
+                    let eacces = this.eval_libc("EACCES");
+                    this.set_last_error(eacces)?;
                     -1
                 }
             } else {

@@ -196,7 +196,7 @@ fn test_file_set_len() {
 
     // Can't use set_len on a file not opened for writing
     let file = OpenOptions::new().read(true).open(&path).unwrap();
-    assert_eq!(ErrorKind::InvalidInput, file.set_len(14).unwrap_err().kind());
+    assert_eq!(ErrorKind::PermissionDenied, file.set_len(14).unwrap_err().kind());
 
     remove_file(&path).unwrap();
 }

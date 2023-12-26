@@ -393,6 +393,59 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         Ok(this.eval_windows("c", "TRUE"))
     }
 
+    fn SetFileInformationByHandle(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>, // HANDLE
+        class_op: &OpTy<'tcx, Provenance>,  // FILE_INFO_BY_HANDLE_CLASS
+        info_op: &OpTy<'tcx, Provenance>,   // PVOID
+        size_op: &OpTy<'tcx, Provenance>,   // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
+        let this = self.eval_context_mut();
+
+        let handle = this.read_handle(handle_op)?;
+        let class = this.read_scalar(class_op)?.to_u32()?;
+        this.read_pointer(info_op)?;
+        this.read_scalar(size_op)?.to_u32()?; // FIXME do we need to actually check this size?
+
+        let Some(Handle::File(fd)) = handle else {
+            return this.invalid_handle("FALSE");
+        };
+
+        let Some(file_handle) = this.machine.file_handler.handles.get(&fd) else {
+            return this.invalid_handle("FALSE");
+        };
+
+        let Some(FileHandle { file, .. }) = file_handle.downcast_ref() else {
+            this.set_last_error(this.eval_windows("c", "ERROR_INVALID_FUNCTION"))?;
+            return Ok(this.eval_windows("c", "FALSE"));
+        };
+
+        assert!(
+            this.machine.communicate(),
+            "isolation should have prevented opening the file at all"
+        );
+
+        let result = if class == this.eval_windows_u32("c", "FileEndOfFileInfo") {
+            let place = this.project_field_named(
+                &this.deref_pointer_as(info_op, this.windows_ty_layout("FILE_END_OF_FILE_INFO"))?,
+                "EndOfFile",
+            )?;
+
+            let new_eof = this.read_scalar(&place)?.to_u64()?;
+
+            file.set_len(new_eof)
+        } else {
+            throw_unsup_format!(
+                "unsupported `FileInformationClass` {class:#x} in `SetFileInformationByHandle`"
+            );
+        };
+
+        match this.try_unwrap_io_result(result)? {
+            Some(()) => Ok(this.eval_windows("c", "TRUE")),
+            None => Ok(this.eval_windows("c", "FALSE")),
+        }
+    }
+
     fn SetFilePointerEx(
         &mut self,
         handle_op: &OpTy<'tcx, Provenance>,       // HANDLE

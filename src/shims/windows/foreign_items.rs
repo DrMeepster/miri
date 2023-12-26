@@ -93,6 +93,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.GetFileInformationByHandle(handle, info)?;
                 this.write_scalar(result, dest)?;
             }
+            "SetFileInformationByHandle" => {
+                let [handle, class, info, size] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.SetFileInformationByHandle(handle, class, info, size)?;
+                this.write_scalar(result, dest)?;
+            }
             "SetFilePointerEx" => {
                 let [handle, distance, new_file_ptr, method] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
