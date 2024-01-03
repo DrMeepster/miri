@@ -173,6 +173,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.GetFullPathNameW(filename, buf, size, filepart)?;
                 this.write_scalar(result, dest)?;
             }
+            "FlushFileBuffers" => {
+                let [handle] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.FlushFileBuffers(handle)?;
+                this.write_scalar(result, dest)?;
+            }
 
             // Allocation
             "HeapAlloc" => {

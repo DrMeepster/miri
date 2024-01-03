@@ -210,10 +210,18 @@ fn test_file_sync() {
     file.sync_data().unwrap();
     file.sync_all().unwrap();
 
-    // Test that we can call sync_data and sync_all on a file opened for reading.
-    let file = File::open(&path).unwrap();
+    // Test that we can call sync_data and sync_all on a file opened for appending.
+    let file = OpenOptions::new().append(true).open(&path).unwrap();
     file.sync_data().unwrap();
     file.sync_all().unwrap();
+
+    // Test that we can call sync_data and sync_all on a file opened for reading.
+    // This is not allowed on windows.
+    if cfg!(not(windows)) {
+        let file = File::open(&path).unwrap();
+        file.sync_data().unwrap();
+        file.sync_all().unwrap();
+    }
 
     remove_file(&path).unwrap();
 }

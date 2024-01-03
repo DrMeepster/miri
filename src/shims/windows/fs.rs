@@ -771,4 +771,43 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
             /*truncate*/ false,
         )?)))
     }
+
+    fn FlushFileBuffers(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>, // HANDLE
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
+        let this = self.eval_context_mut();
+
+        let handle = this.read_handle(handle_op)?;
+
+        // Reject if isolation is enabled.
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`FlushFileBuffers`", reject_with)?;
+            return this.invalid_handle("FALSE");
+        }
+
+        let Some(Handle::File(fd)) = handle else { return this.invalid_handle("FALSE") };
+
+        let Some(file_descriptor) = this.machine.file_handler.handles.get(&fd) else {
+            return this.invalid_handle("FALSE");
+        };
+
+        // FIXME: Support FlushFileBuffers for all FDs
+        let FileHandle { file, writable, .. } =
+            file_descriptor.downcast_ref::<FileHandle>().ok_or_else(|| {
+                err_unsup_format!(
+                    "`FlushFileBuffers` is only supported on file-backed file descriptors"
+                )
+            })?;
+
+        if !writable {
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(this.eval_windows("c", "FALSE"));
+        }
+
+        match this.try_unwrap_io_result(file.sync_all())? {
+            Some(_) => Ok(this.eval_windows("c", "TRUE")),
+            None => Ok(this.eval_windows("c", "FALSE")),
+        }
+    }
 }
