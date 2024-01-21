@@ -1,6 +1,6 @@
 use std::fs::{remove_file, File, Metadata};
 use std::io::{self, ErrorKind, SeekFrom};
-use std::path::{self, PathBuf};
+use std::path::{self, Path, PathBuf};
 
 use rustc_middle::ty::TyCtxt;
 use rustc_target::abi::Size;
@@ -76,6 +76,29 @@ impl FileDescriptor for MetadataHandle {
 
     fn path(&self) -> Option<&std::path::Path> {
         Some(&self.path)
+    }
+}
+
+impl<'mir, 'tcx> EvalContextExtPriv<'mir, 'tcx> for MiriInterpCx<'mir, 'tcx> {}
+pub trait EvalContextExtPriv<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
+    fn attributes_from_metadata(&self, meta: &Metadata) -> u32 {
+        let this = self.eval_context_ref();
+
+        let mut attributes = 0;
+
+        if meta.is_dir() {
+            attributes |= this.eval_windows_u32("c", "FILE_ATTRIBUTE_DIRECTORY");
+        }
+
+        if meta.is_symlink() {
+            attributes |= this.eval_windows_u32("c", "FILE_ATTRIBUTE_REPARSE_POINT");
+        }
+
+        if meta.permissions().readonly() {
+            attributes |= this.eval_windows_u32("c", "FILE_ATTRIBUTE_READONLY");
+        }
+
+        attributes
     }
 }
 
@@ -337,19 +360,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
             return this.invalid_handle("FALSE");
         };
 
-        let mut attributes = 0;
-
-        if meta.is_dir() {
-            attributes |= this.eval_windows_u32("c", "FILE_ATTRIBUTE_DIRECTORY");
-        }
-
-        if meta.is_symlink() {
-            attributes |= this.eval_windows_u32("c", "FILE_ATTRIBUTE_REPARSE_POINT");
-        }
-
-        if meta.permissions().readonly() {
-            attributes |= this.eval_windows_u32("c", "FILE_ATTRIBUTE_READONLY");
-        }
+        let attributes = this.attributes_from_metadata(&meta);
 
         let created = match meta.created() {
             Ok(t) => this.system_time_to_windows_filetime(&t)?,
@@ -393,6 +404,63 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         Ok(this.eval_windows("c", "TRUE"))
     }
 
+    fn GetFileInformationByHandleEx(
+        &mut self,
+        handle_op: &OpTy<'tcx, Provenance>, // HANDLE
+        class_op: &OpTy<'tcx, Provenance>,  // FILE_INFO_BY_HANDLE_CLASS
+        info_op: &OpTy<'tcx, Provenance>,   // LPVOID
+        size_op: &OpTy<'tcx, Provenance>,   // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
+        let this = self.eval_context_mut();
+
+        let handle = this.read_handle(handle_op)?;
+        let class = this.read_scalar(class_op)?.to_u32()?;
+        this.read_pointer(info_op)?;
+        let size = this.read_scalar(size_op)?.to_u32()?;
+
+        // Isolation check is done via `FileDescriptor` trait.
+        let communicate = this.machine.communicate();
+
+        let Some(Handle::File(fd)) = handle else {
+            return this.invalid_handle("FALSE");
+        };
+
+        let Some(file) = this.machine.file_handler.handles.get_mut(&fd) else {
+            return this.invalid_handle("FALSE");
+        };
+
+        let result = file.metadata(communicate)?;
+
+        let Some(meta) = this.try_unwrap_io_result(result)? else {
+            return this.invalid_handle("FALSE");
+        };
+
+        if class == this.eval_windows_u32("c", "FileAttributeTagInfo") {
+            let layout = this.windows_ty_layout("FILE_ATTRIBUTE_TAG_INFO");
+
+            if u64::from(size) < layout.size.bytes() {
+                this.set_last_error(this.eval_windows("c", "ERROR_INSUFFICIENT_BUFFER"))?;
+                return Ok(this.eval_windows("c", "FALSE"));
+            }
+
+            let info = this.deref_pointer_as(info_op, layout)?;
+
+            let attributes = this.attributes_from_metadata(&meta);
+            let reparse_tag = this.eval_windows_u32("c", "IO_REPARSE_TAG_SYMLINK");
+
+            this.write_int_fields_named(
+                &[("FileAttributes", attributes.into()), ("ReparseTag", reparse_tag.into())],
+                &info,
+            )?;
+        } else {
+            throw_unsup_format!(
+                "unsupported `FileInformationClass` {class:#x} in `GetFileInformationByHandleEx`"
+            );
+        }
+
+        Ok(this.eval_windows("c", "TRUE"))
+    }
+
     fn SetFileInformationByHandle(
         &mut self,
         handle_op: &OpTy<'tcx, Provenance>, // HANDLE
@@ -405,7 +473,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let handle = this.read_handle(handle_op)?;
         let class = this.read_scalar(class_op)?.to_u32()?;
         this.read_pointer(info_op)?;
-        this.read_scalar(size_op)?.to_u32()?; // FIXME do we need to actually check this size?
+        let size = this.read_scalar(size_op)?.to_u32()?;
 
         let Some(Handle::File(fd)) = handle else {
             return this.invalid_handle("FALSE");
@@ -416,8 +484,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         };
 
         let Some(FileHandle { file, .. }) = file_handle.downcast_ref() else {
-            this.set_last_error(this.eval_windows("c", "ERROR_INVALID_FUNCTION"))?;
-            return Ok(this.eval_windows("c", "FALSE"));
+            return this.invalid_handle("FALSE");
         };
 
         assert!(
@@ -426,10 +493,15 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         );
 
         let result = if class == this.eval_windows_u32("c", "FileEndOfFileInfo") {
-            let place = this.project_field_named(
-                &this.deref_pointer_as(info_op, this.windows_ty_layout("FILE_END_OF_FILE_INFO"))?,
-                "EndOfFile",
-            )?;
+            let layout = this.windows_ty_layout("FILE_END_OF_FILE_INFO");
+
+            if u64::from(size) < layout.size.bytes() {
+                this.set_last_error(this.eval_windows("c", "ERROR_INSUFFICIENT_BUFFER"))?;
+                return Ok(this.eval_windows("c", "FALSE"));
+            }
+
+            let place =
+                this.project_field_named(&this.deref_pointer_as(info_op, layout)?, "EndOfFile")?;
 
             let new_eof = this.read_scalar(&place)?.to_u64()?;
 
@@ -809,5 +881,98 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
             Some(_) => Ok(this.eval_windows("c", "TRUE")),
             None => Ok(this.eval_windows("c", "FALSE")),
         }
+    }
+
+    fn CreateSymbolicLinkW(
+        &mut self,
+        link_filename_op: &OpTy<'tcx, Provenance>, // LPCWSTR
+        target_filename_op: &OpTy<'tcx, Provenance>, // LPCWSTR
+        flags_op: &OpTy<'tcx, Provenance>,         // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOLEAN (different from BOOL) */ {
+        #[cfg(unix)]
+        fn create_link<'tcx>(
+            src: &Path,
+            dst: &Path,
+            directory: bool,
+        ) -> InterpResult<'tcx, std::io::Result<()>> {
+            if src.is_dir() != directory {
+                let kind =
+                    if directory { ErrorKind::NotADirectory } else { ErrorKind::IsADirectory };
+
+                return Ok(Err(kind.into()));
+            }
+
+            let result = std::os::unix::fs::symlink(src, dst);
+
+            if result.is_err() {
+                return Ok(result);
+            }
+
+            //abort if the file/directory was replaced with a directory/file between the check and creating the symlink
+            // FIXME should we delete the symlink?
+            if dst.is_dir() != directory {
+                if directory {
+                    throw_machine_stop!(TerminationInfo::Abort(
+                        "symlink target directory replaced with file during creation".to_string()
+                    ))
+                } else {
+                    throw_machine_stop!(TerminationInfo::Abort(
+                        "symlink target file replaced with directory during creation".to_string()
+                    ))
+                }
+            }
+
+            Ok(Ok(()))
+        }
+
+        #[cfg(windows)]
+        fn create_link<'tcx>(
+            src: &Path,
+            dst: &Path,
+            directory: bool,
+        ) -> InterpResult<'tcx, std::io::Result<()>> {
+            use std::os::windows::fs;
+
+            let result =
+                if directory { fs::symlink_dir(src, dst) } else { fs::symlink_file(src, dst) };
+
+            Ok(result)
+        }
+
+        let this = self.eval_context_mut();
+
+        let link_path = this.read_path_from_wide_str(this.read_pointer(link_filename_op)?)?;
+        let target_path = this.read_path_from_wide_str(this.read_pointer(target_filename_op)?)?;
+        let flags = this.read_scalar(flags_op)?.to_u32()?;
+
+        // Reject if isolation is enabled.
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`CreateSymbolicLinkW`", reject_with)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(Scalar::from_bool(false));
+        }
+
+        let directory_flag = this.eval_windows_u32("c", "SYMBOLIC_LINK_FLAG_DIRECTORY");
+        let unprivileged_flag =
+            this.eval_windows_u32("c", "SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE");
+
+        let unsupported_flags = !(directory_flag | unprivileged_flag);
+
+        let directory = flags & directory_flag != 0;
+
+        if flags & unprivileged_flag == 0 {
+            throw_unsup_format!(
+                "`dwFlags` does not have `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE`",
+            )
+        }
+
+        if flags & unsupported_flags != 0 {
+            throw_unsup_format!("unsupported `dwFlags` {:#x}", flags & unsupported_flags)
+        }
+
+        let result = create_link(&target_path, &link_path, directory)?;
+        let success = this.try_unwrap_io_result(result)?.is_some();
+
+        Ok(Scalar::from_bool(success))
     }
 }

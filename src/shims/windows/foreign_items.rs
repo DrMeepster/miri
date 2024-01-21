@@ -93,6 +93,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.GetFileInformationByHandle(handle, info)?;
                 this.write_scalar(result, dest)?;
             }
+            "GetFileInformationByHandleEx" => {
+                let [handle, class, info, size] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.GetFileInformationByHandleEx(handle, class, info, size)?;
+                this.write_scalar(result, dest)?;
+            }
             "SetFileInformationByHandle" => {
                 let [handle, class, info, size] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
@@ -177,6 +183,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let [handle] =
                     this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
                 let result = this.FlushFileBuffers(handle)?;
+                this.write_scalar(result, dest)?;
+            }
+            "CreateSymbolicLinkW" => {
+                let [link_filename, target_filename, flags] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.CreateSymbolicLinkW(link_filename, target_filename, flags)?;
                 this.write_scalar(result, dest)?;
             }
 
