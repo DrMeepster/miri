@@ -215,14 +215,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         base: &P,
         name: &str,
     ) -> InterpResult<'tcx, P> {
-        let this = self.eval_context_ref();
-        let adt = base.layout().ty.ty_adt_def().unwrap();
-        for (idx, field) in adt.non_enum_variant().fields.iter().enumerate() {
-            if field.name.as_str() == name {
-                return this.project_field(base, idx);
-            }
-        }
-        bug!("No field named {} in type {}", name, base.layout().ty);
+        let this: &InterpCx<'_, '_, MiriMachine<'_, '_>> = self.eval_context_ref();
+        let idx = field_idx_by_name(base.layout().ty, name);
+        this.project_field(base, idx)
     }
 
     /// Write an int of the appropriate size to `dest`. The target type may be signed or unsigned,
@@ -1200,7 +1195,7 @@ pub(crate) fn round_to_next_multiple_of(x: u64, divisor: u64) -> u64 {
     return (x.checked_add(divisor - 1).unwrap() / divisor) * divisor;
 }
 
-/// splits a `u64` into `(low_order, high_order)` components
+/// Splits a `u64` into `(low_order, high_order)` components.
 pub(crate) fn split_u64(x: u64) -> (u32, u32) {
     #[allow(clippy::cast_possible_truncation)] // truncation is intentional
     let low_order = x as u32;
@@ -1222,4 +1217,15 @@ pub(crate) fn windows_check_buffer_size((success, len): (bool, u64)) -> u32 {
         // required to hold the string and its terminating null character.
         u32::try_from(len).unwrap()
     }
+}
+
+/// Find the index of a field by its name. `ty` must be a struct or union.
+pub fn field_idx_by_name(ty: Ty<'_>, name: &str) -> usize {
+    let adt = ty.ty_adt_def().unwrap();
+    for (idx, field) in adt.non_enum_variant().fields.iter().enumerate() {
+        if field.name.as_str() == name {
+            return idx;
+        }
+    }
+    bug!("No field named {} in type {}", name, ty);
 }

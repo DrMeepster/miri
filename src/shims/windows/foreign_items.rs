@@ -191,6 +191,29 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let result = this.CreateSymbolicLinkW(link_filename, target_filename, flags)?;
                 this.write_scalar(result, dest)?;
             }
+            "DeviceIoControl" => {
+                let [
+                    device,
+                    code,
+                    in_buf,
+                    in_buf_size,
+                    out_buf,
+                    out_buf_size,
+                    bytes_returned,
+                    overlapped,
+                ] = this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.DeviceIoControl(
+                    device,
+                    code,
+                    in_buf,
+                    in_buf_size,
+                    out_buf,
+                    out_buf_size,
+                    bytes_returned,
+                    overlapped,
+                )?;
+                this.write_scalar(result, dest)?;
+            }
 
             // Allocation
             "HeapAlloc" => {

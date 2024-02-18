@@ -154,4 +154,15 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let ntstatus = win32_error_to_ntstatus(error);
         Ok(Scalar::from_u32(ntstatus))
     }
+
+    // Sets the last error to the given constant and returns `FALSE`
+    fn set_last_error_from_win32(
+        &mut self,
+        error_name: &str,
+    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        let this = self.eval_context_mut();
+
+        this.set_last_error(this.eval_windows("c", error_name))
+            .map(|_| this.eval_windows("c", "FALSE"))
+    }
 }

@@ -12,10 +12,11 @@ use crate::shims::windows::handle::{EvalContextExt as _, Handle};
 use crate::*;
 
 /// Special "file handle" for how std gets metadata
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct MetadataHandle {
     data: Metadata,
     path: PathBuf,
+    link_path: Option<PathBuf>,
 }
 
 impl FileDescriptor for MetadataHandle {
@@ -66,7 +67,7 @@ impl FileDescriptor for MetadataHandle {
     }
 
     fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
-        Ok(Box::new(MetadataHandle { data: self.data.clone(), path: self.path.clone() }))
+        Ok(Box::new(self.clone()))
     }
 
     // technically, this should fail
@@ -215,19 +216,27 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
                 )
             }
 
-            let result = if follow_symlinks { path.metadata() } else { path.symlink_metadata() };
+            let result = try {
+                let data =
+                    if follow_symlinks { path.metadata()? } else { path.symlink_metadata()? };
 
-            match this.try_unwrap_io_result(result)? {
-                Some(data) => {
-                    let id = this
-                        .machine
-                        .file_handler
-                        .insert_fd(Box::new(MetadataHandle { data, path }));
+                let link_path = if data.is_symlink() {
+                    assert!(!follow_symlinks);
+                    Some(path.read_link()?)
+                } else {
+                    None
+                };
 
-                    Ok(Handle::File(id).to_scalar(this))
-                }
-                None => Ok(this.eval_windows("c", "INVALID_HANDLE_VALUE")),
-            }
+                let fd = MetadataHandle { data, path, link_path };
+
+                let id = this.machine.file_handler.insert_fd(Box::new(fd));
+
+                Handle::File(id).to_scalar(this)
+            };
+
+            Ok(this
+                .try_unwrap_io_result(result)?
+                .unwrap_or_else(|| this.eval_windows("c", "INVALID_HANDLE_VALUE")))
         } else {
             // CREATE_ALWAYS and OPEN_ALWAYS set the last error when the file already exists
             let mut check_file_preexistance = false;
@@ -974,5 +983,139 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         let success = this.try_unwrap_io_result(result)?.is_some();
 
         Ok(Scalar::from_bool(success))
+    }
+
+    fn DeviceIoControl(
+        &mut self,
+        device_op: &OpTy<'tcx, Provenance>,         // HANDLE
+        code_op: &OpTy<'tcx, Provenance>,           // DWORD
+        in_buf_op: &OpTy<'tcx, Provenance>,         // LPVOID
+        in_buf_size_op: &OpTy<'tcx, Provenance>,    // DWORD
+        out_buf_op: &OpTy<'tcx, Provenance>,        // LPVOID
+        out_buf_size_op: &OpTy<'tcx, Provenance>,   // DWORD
+        bytes_returned_op: &OpTy<'tcx, Provenance>, // LPDWORD
+        overlapped_op: &OpTy<'tcx, Provenance>,     // LPOVERLAPPED
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
+        let this = self.eval_context_mut();
+
+        let device = this.read_handle(device_op)?;
+        let code = this.read_scalar(code_op)?.to_u32()?;
+        this.read_pointer(in_buf_op)?; // not used by supported codes
+        this.read_scalar(in_buf_size_op)?.to_u32()?; // not used by supported codes
+        let out_buf = this.read_pointer(out_buf_op)?;
+        let out_buf_size = Size::from_bytes(this.read_scalar(out_buf_size_op)?.to_u32()?);
+        let bytes_returned_dest =
+            this.deref_pointer_as(bytes_returned_op, this.machine.layouts.u32)?;
+        let overlapped = this.read_pointer(overlapped_op)?;
+
+        // Isolation check is done via `FileDescriptor` trait.
+        let communicate = this.machine.communicate();
+
+        // write zero in advance so we can just early return if there is an error
+        this.write_null(&bytes_returned_dest)?;
+
+        let Some(handle) = device else { return this.invalid_handle("FALSE") };
+
+        if !this.ptr_is_null(out_buf)? {
+            this.check_ptr_access(out_buf, out_buf_size, CheckInAllocMsg::MemoryAccessTest)?;
+        }
+
+        if !this.ptr_is_null(overlapped)? {
+            throw_unsup_format!("non-null `lpOverlapped` in `DeviceIoControl`")
+        }
+
+        let bytes_returned = if code == this.eval_windows_u32("c", "FSCTL_GET_REPARSE_POINT") {
+            // https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-fscc/d86a4c4d-a996-403a-8b92-9c0e1a300e22
+            // https://learn.microsoft.com/en-us/windows-hardware/drivers/ifs/fsctl-get-reparse-point
+
+            let generic_layout = this.windows_ty_layout("REPARSE_DATA_BUFFER");
+            let symlink_offset =
+                generic_layout.fields.offset(helpers::field_idx_by_name(generic_layout.ty, "rest"));
+
+            let symlink_layout = this.windows_ty_layout("SYMBOLIC_LINK_REPARSE_BUFFER");
+            let path_offset = symlink_layout
+                .fields
+                .offset(helpers::field_idx_by_name(symlink_layout.ty, "PathBuffer"));
+
+            #[allow(clippy::arithmetic_side_effects)]
+            let offset = symlink_offset + path_offset;
+
+            if out_buf_size < path_offset {
+                return this.set_last_error_from_win32("ERROR_INSUFFICIENT_BUFFER");
+            }
+
+            let path_buf = out_buf.offset(offset, this)?;
+
+            let Some(path_buf_size) = out_buf_size.bytes().checked_sub(offset.bytes()) else {
+                return this.set_last_error_from_win32("ERROR_MORE_DATA");
+            };
+
+            let Handle::File(fd) = handle else {
+                this.set_last_error_from_io_error(ErrorKind::InvalidInput)?;
+                return Ok(this.eval_windows("c", "FALSE"));
+            };
+
+            let Some(file) = this.machine.file_handler.handles.get(&fd) else {
+                this.set_last_error_from_io_error(ErrorKind::InvalidInput)?;
+                return Ok(this.eval_windows("c", "FALSE"));
+            };
+
+            let Some(MetadataHandle { link_path, .. }) = file.downcast_ref::<MetadataHandle>()
+            else {
+                throw_unsup_format!(
+                    "`FSCTL_GET_REPARSE_POINT` is only supported on permissionless file handles"
+                )
+            };
+
+            let Some(path) = link_path.clone() else {
+                this.set_last_error_from_io_error(ErrorKind::InvalidInput)?;
+                return Ok(this.eval_windows("c", "FALSE"));
+            };
+
+            let (written, length) =
+                this.write_path_to_wide_str(&path, path_buf, path_buf_size / 2, false)?;
+
+            // FIXME: write_path_to_wide_str writes an unnecessary null terminator here
+            let byte_length = length.checked_sub(1).unwrap().checked_mul(2).unwrap();
+
+            if !written {
+                return this.set_last_error_from_win32("ERROR_MORE_DATA");
+            }
+
+            let reparse_buffer = this.deref_pointer_as(out_buf_op, generic_layout)?;
+
+            let reparse_tag = this.eval_windows_u32("c", "IO_REPARSE_TAG_SYMLINK");
+            let reparse_data_length = symlink_layout.size.bytes().checked_add(byte_length).unwrap();
+
+            this.write_int_fields_named(
+                &[
+                    ("ReparseTag", reparse_tag.into()),
+                    ("ReparseDataLength", reparse_data_length.into()),
+                    ("Reserved", 0),
+                ],
+                &reparse_buffer,
+            )?;
+
+            let symlink_buffer = reparse_buffer.offset(symlink_offset, symlink_layout, this)?;
+
+            this.write_int_fields_named(
+                &[
+                    ("SubstituteNameOffset", 0),
+                    ("SubstituteNameLength", byte_length.into()),
+                    ("PrintNameOffset", 0),
+                    ("PrintNameLength", byte_length.into()),
+                    ("Flags", 0),
+                ],
+                &symlink_buffer,
+            )?;
+
+            offset.bytes().checked_add(byte_length).unwrap().try_into().unwrap()
+        } else {
+            throw_unsup_format!("unsupported io control code {code:x}")
+        };
+
+        this.write_scalar(Scalar::from_u32(bytes_returned), &bytes_returned_dest)?;
+
+        Ok(this.eval_windows("c", "TRUE"))
     }
 }
