@@ -448,8 +448,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
             let layout = this.windows_ty_layout("FILE_ATTRIBUTE_TAG_INFO");
 
             if u64::from(size) < layout.size.bytes() {
-                this.set_last_error(this.eval_windows("c", "ERROR_INSUFFICIENT_BUFFER"))?;
-                return Ok(this.eval_windows("c", "FALSE"));
+                return this.set_last_error_from_win32("ERROR_INSUFFICIENT_BUFFER");
             }
 
             let info = this.deref_pointer_as(info_op, layout)?;
@@ -505,8 +504,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
             let layout = this.windows_ty_layout("FILE_END_OF_FILE_INFO");
 
             if u64::from(size) < layout.size.bytes() {
-                this.set_last_error(this.eval_windows("c", "ERROR_INSUFFICIENT_BUFFER"))?;
-                return Ok(this.eval_windows("c", "FALSE"));
+                return this.set_last_error_from_win32("ERROR_INSUFFICIENT_BUFFER");
             }
 
             let place =
@@ -1008,8 +1006,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
             this.deref_pointer_as(bytes_returned_op, this.machine.layouts.u32)?;
         let overlapped = this.read_pointer(overlapped_op)?;
 
-        // Isolation check is done via `FileDescriptor` trait.
-        let communicate = this.machine.communicate();
+        // Reject if isolation is enabled.
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`rename`", reject_with)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(this.eval_windows("c", "FALSE"));
+        }
 
         // write zero in advance so we can just early return if there is an error
         this.write_null(&bytes_returned_dest)?;
