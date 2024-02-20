@@ -214,6 +214,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 )?;
                 this.write_scalar(result, dest)?;
             }
+            "MoveFileExW" => {
+                let [old_path, new_path, flags] =
+                    this.check_shim(abi, Abi::System { unwind: false }, link_name, args)?;
+                let result = this.MoveFileExW(old_path, new_path, flags)?;
+                this.write_scalar(result, dest)?;
+            }
 
             // Allocation
             "HeapAlloc" => {

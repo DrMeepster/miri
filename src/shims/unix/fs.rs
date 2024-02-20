@@ -809,6 +809,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             return Ok(-1);
         }
 
+        // note: this has slightly different behavior on a windows host vs unix host
         let result = rename(oldpath, newpath).map(|_| 0);
 
         this.try_unwrap_io_result_unix(result)

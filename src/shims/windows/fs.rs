@@ -1,4 +1,4 @@
-use std::fs::{remove_file, File, Metadata};
+use std::fs::{remove_file, rename, File, Metadata};
 use std::io::{self, ErrorKind, SeekFrom};
 use std::path::{self, Path, PathBuf};
 
@@ -1119,5 +1119,35 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: MiriInterpCxExt<'mir, 'tcx> {
         this.write_scalar(Scalar::from_u32(bytes_returned), &bytes_returned_dest)?;
 
         Ok(this.eval_windows("c", "TRUE"))
+    }
+
+    fn MoveFileExW(
+        &mut self,
+        old_path_op: &OpTy<'tcx, Provenance>, // LPCWSTR
+        new_path_op: &OpTy<'tcx, Provenance>, // LPCWSTR
+        flags_op: &OpTy<'tcx, Provenance>,    // DWORD
+    ) -> InterpResult<'tcx, Scalar<Provenance>> /* BOOL */ {
+        let this = self.eval_context_mut();
+
+        let old_path = this.read_path_from_wide_str(this.read_pointer(old_path_op)?)?;
+        let new_path = this.read_path_from_wide_str(this.read_pointer(new_path_op)?)?;
+        let flags = this.read_scalar(flags_op)?.to_u32()?;
+
+        // Reject if isolation is enabled.
+        if let IsolatedOp::Reject(reject_with) = this.machine.isolated_op {
+            this.reject_in_isolation("`rename`", reject_with)?;
+            this.set_last_error_from_io_error(ErrorKind::PermissionDenied)?;
+            return Ok(this.eval_windows("c", "FALSE"));
+        }
+
+        if flags != this.eval_windows_u32("c", "MOVEFILE_REPLACE_EXISTING") {
+            throw_unsup_format!("`dwFlags` != `MOVEFILE_REPLACE_EXISTING`")
+        }
+
+        // note: this has slightly different behavior on a windows host vs unix host
+        Ok(match this.try_unwrap_io_result(rename(old_path, new_path))? {
+            Some(()) => this.eval_windows("c", "TRUE"),
+            None => this.eval_windows("c", "FALSE"),
+        })
     }
 }
